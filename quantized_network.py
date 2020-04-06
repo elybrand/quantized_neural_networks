@@ -63,13 +63,12 @@ class QuantizedNeuralNetwork():
 							for layer_idx, weight_matrix in enumerate(network.get_weights())
 						}
 
-		# Logs the perterbations in the directions caused by passing the data through the unquantized weights
-		# and through the quantized weights. For layer ell, we'll store these vectors as rows in a N_ell
-		# by batch_size matrix.
-		self.step_variations = {	        
-					layer_idx: zeros((
+		# Logs the relative error between the data fed through the unquantized network and the
+		# quantized network.
+		self.layerwise_rel_errs = {	        
+					layer_idx: zeros(
 								weight_matrix.shape[0], # N_{ell} dimensional feature,
-								self.batch_size)) 		# Dimension of the variations in directions.
+								) 
 					for layer_idx, weight_matrix in enumerate(network.get_weights())
 				}
 
@@ -126,7 +125,8 @@ class QuantizedNeuralNetwork():
 									[self.quantized_net.layers[layer_idx-1].output]
 									)
 
-			for neuron_idx in range(N_ell_plus_1):
+			# Here, we need to loop over the neurons in the previous layer.
+			for neuron_idx in range(N_ell):
 
 				wBatch = self.get_batch_data(self.batch_size)
 				qBatch = self.get_batch_data(self.batch_size) if self.use_indep_quant_steps else wBatch
@@ -136,8 +136,8 @@ class QuantizedNeuralNetwork():
 				wX[:, neuron_idx] = trained_output([wBatch])[0][:, neuron_idx]
 				qX[:, neuron_idx] = quant_output([qBatch])[0][:, neuron_idx]
 
-		# Log the Delta X_t's.
-		self.step_variations[layer_idx] = (wX - qX).T
+		# Log the relative errors in the data.
+		self.layerwise_rel_errs[layer_idx] = [norm(wX[:, t] - qX[:, t])/norm(wX[:,t]) for t in range(N_ell)]
 
 		# Now quantize the neurons. This is parallelizable if you wish to make it so.
 		for neuron_idx in range(N_ell_plus_1):
@@ -182,6 +182,45 @@ class QuantizedNeuralNetwork():
 		q_ax = axes[1,1]
 		q_ax.set_title("Histogrammed Bits")
 		q_ax.hist(q)
+
+		return axes
+
+	def layer_dashboard(self, layer_idx: int) -> Axes:
+
+		W = self.trained_net.get_weights()[layer_idx]
+		Q = self.quantized_net.get_weights()[layer_idx]
+		U_tensor = self.residuals[layer_idx]
+		N_ell, N_ell_plus_1 = W.shape
+
+		fig, axes = subplots(2,2, figsize=(10,10))
+		fig.suptitle(f"Dashboard for Layer {layer_idx}: $(N_{{L}}, N_{{L+1}}, d)$ = ({N_ell}, {N_ell_plus_1}, {self.batch_size})")
+		# adjust the spacing between axes
+		fig.tight_layout(pad=6.0)
+
+		# For every t, plot sup_{neurons} ||u_t||
+		sup_resids = [max([norm(U_tensor[neuron_idx, t, :]) for neuron_idx in range(N_ell_plus_1)]) 
+						for t in range(N_ell)]
+		resid_ax = axes[0,0]
+		resid_ax.set_title("Supremal Residual Across Neurons")
+		resid_ax.set_xlabel("t", fontsize=14)
+		resid_ax.set_ylabel(r"$\sup ||u_t||$", fontsize=14)
+		resid_ax.plot(range(N_ell), sup_resids, '-o')
+
+		# Plot relative error of data pushed through the quantized net.
+		rel_errs_ax = axes[0,1]
+		rel_errs_ax.set_title("Relative Data Errors")
+		rel_errs_ax.set_xlabel("t", fontsize=14)
+		rel_errs_ax.set_ylabel(r"$\frac{||\Delta X||}{||X||}$", fontsize=14)
+		rel_errs_ax.plot(range(N_ell), self.layerwise_rel_errs[layer_idx], '-o')
+
+		# Histogram the population of weights as well as the bits.
+		w_hist = axes[1,0]
+		w_hist.set_title("Histogram of Weights")
+		w_hist.hist(W.flatten())
+
+		q_hist = axes[1,1]
+		q_hist.set_title("Histogram of Bits")
+		q_hist.hist(Q.flatten())
 
 		return axes
 
