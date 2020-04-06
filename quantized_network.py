@@ -6,6 +6,10 @@ from keras.models import Sequential, clone_model
 from keras.layers import Dense
 from typing import Optional, Callable
 from collections import namedtuple
+from matplotlib.pyplot import subplots
+from matplotlib.axes import Axes
+
+
 
 QuantizedNeuron = namedtuple("QuantizedNeuron", ['layer_idx', 'neuron_idx', 'q', 'U'])
 
@@ -152,6 +156,35 @@ class QuantizedNeuralNetwork():
 		# This must be done sequentially.
 		for layer_idx in range(len(self.trained_net.layers)):
 			self.quantize_layer(layer_idx)
+
+	def neuron_dashboard(self, layer_idx: int, neuron_idx: int) -> Axes:
+
+		w = self.trained_net.get_weights()[layer_idx][:,neuron_idx]
+		q = self.quantized_net.get_weights()[layer_idx][:, neuron_idx]
+		N_ell = w.shape[0]
+
+		fig, axes = subplots(2,2, figsize=(10,10))
+
+		fig.suptitle(f"Dashboard for Neuron {neuron_idx} in Layer {layer_idx}", fontsize=24)
+
+		resid_ax = axes[0,0]
+		resid_ax.set_title("Norm of Residuals")
+		resid_ax.set_xlabel(r"t", fontsize=14)
+		resid_ax.set_ylabel(r"$||u_t||$", fontsize=14)
+		resid_ax.plot(range(N_ell), [norm(self.residuals[layer_idx][neuron_idx, t, :]) for t in range(N_ell)], '-o')
+
+		# TODO: What could go in axes[0,1]?
+
+		w_ax = axes[1,0]
+		w_ax.set_title("Histogrammed Weights")
+		w_ax.hist(w)
+
+		q_ax = axes[1,1]
+		q_ax.set_title("Histogrammed Bits")
+		q_ax.hist(q)
+
+		return axes
+
 
 if __name__ == "__main__":
 
