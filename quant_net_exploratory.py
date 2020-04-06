@@ -25,5 +25,3 @@ if __name__ = "__main__":
 	my_quant_net = QuantizedNeuralNetwork(model, batch_size, get_batch_data)
 	my_quant_net.quantize_network()
 
-	fig, ax = 
-
