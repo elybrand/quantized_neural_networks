@@ -202,16 +202,12 @@ class QuantizedNeuralNetwork():
 						for t in range(N_ell)]
 		resid_ax = axes[0,0]
 		resid_ax.set_title("Supremal Residual Across Neurons")
-		resid_ax.set_xlabel("t", fontsize=14)
-		resid_ax.set_ylabel(r"$\sup ||u_t||$", fontsize=14)
-		resid_ax.plot(range(N_ell), sup_resids, '-o')
+		resid_ax.hist(sup_resids)
 
 		# Plot relative error of data pushed through the quantized net.
 		rel_errs_ax = axes[0,1]
-		rel_errs_ax.set_title("Relative Data Errors")
-		rel_errs_ax.set_xlabel("t", fontsize=14)
-		rel_errs_ax.set_ylabel(r"$\frac{||\Delta X||}{||X||}$", fontsize=14)
-		rel_errs_ax.plot(range(N_ell), self.layerwise_rel_errs[layer_idx], '-o')
+		rel_errs_ax.set_title(r"Histogram of $\frac{||\Delta X_t||}{||X_t||}$")
+		rel_errs_ax.hist(self.layerwise_rel_errs[layer_idx])
 
 		# Histogram the population of weights as well as the bits.
 		w_hist = axes[1,0]
