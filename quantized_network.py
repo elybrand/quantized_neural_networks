@@ -118,10 +118,10 @@ class QuantizedNeuralNetwork():
 		else:
 			# Define functions which will give you the output of the previous hidden layers
 			# for both networks.
-			trained_output = Kfunction([self.trained_net.layers[0].input],
+			prev_trained_output = Kfunction([self.trained_net.layers[0].input],
 										[self.trained_net.layers[layer_idx-1].output]
 									)
-			quant_output = Kfunction([self.quantized_net.layers[0].input],
+			prev_quant_output = Kfunction([self.quantized_net.layers[0].input],
 									[self.quantized_net.layers[layer_idx-1].output]
 									)
 
@@ -133,11 +133,8 @@ class QuantizedNeuralNetwork():
 
 				# Remember, neurons correspond to columns in the weight matrix.
 				# Only take the output of the neuron_idx neuron.
-				wX[:, neuron_idx] = trained_output([wBatch])[0][:, neuron_idx]
-				qX[:, neuron_idx] = quant_output([qBatch])[0][:, neuron_idx]
-
-		# Log the relative errors in the data.
-		self.layerwise_rel_errs[layer_idx] = [norm(wX[:, t] - qX[:, t])/norm(wX[:,t]) for t in range(N_ell)]
+				wX[:, neuron_idx] = prev_trained_output([wBatch])[0][:, neuron_idx]
+				qX[:, neuron_idx] = prev_quant_output([qBatch])[0][:, neuron_idx]
 
 		# Now quantize the neurons. This is parallelizable if you wish to make it so.
 		for neuron_idx in range(N_ell_plus_1):
@@ -150,6 +147,19 @@ class QuantizedNeuralNetwork():
 
 		# Update the quantized network.
 		self.quantized_net.layers[layer_idx].set_weights([Q])
+
+		# Log the relative errors in the data incurred by quantizing this layer.
+		this_layer_trained_output = Kfunction([self.trained_net.layers[layer_idx].input],
+										[self.trained_net.layers[layer_idx].output]
+									)
+		this_layer_quant_output = Kfunction([self.quantized_net.layers[layer_idx].input],
+								[self.quantized_net.layers[layer_idx].output]
+								)
+
+		new_wX = this_layer_trained_output([wX])[0]
+		new_qX = this_layer_quant_output([qX])[0]
+		breakpoint()
+		self.layerwise_rel_errs[layer_idx] = [norm(new_wX[:, t] - new_qX[:, t])/norm(new_wX[:,t]) for t in range(N_ell_plus_1)]
 
 	def quantize_network(self):
 		
