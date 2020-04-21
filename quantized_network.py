@@ -158,7 +158,6 @@ class QuantizedNeuralNetwork():
 
 		new_wX = this_layer_trained_output([wX])[0]
 		new_qX = this_layer_quant_output([qX])[0]
-		breakpoint()
 		self.layerwise_rel_errs[layer_idx] = [norm(new_wX[:, t] - new_qX[:, t])/norm(new_wX[:,t]) for t in range(N_ell_plus_1)]
 
 	def quantize_network(self):

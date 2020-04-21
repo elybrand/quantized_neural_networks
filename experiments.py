@@ -13,6 +13,18 @@ import logging
 from abc import ABC, abstractmethod
 from matplotlib.animation import FuncAnimation
 from itertools import product
+from keras.layers import Dense
+from keras.models import Sequential
+from keras.initializers import RandomUniform
+from keras.backend import function as Kfunction
+import logging
+from sys import stdout
+from quantized_network import QuantizedNeuralNetwork
+%matplotlib osx
+
+logging.basicConfig(stream=stdout)
+logger = logging.getLogger(__name__)
+logger.setLevel(level=logging.DEBUG)
 
 BadDirection = namedtuple('BadDirection', ('q', 'x', 'w'))
 ExperimentResult = namedtuple('ExperimentResult', ('N', 'd', 'num_trials', 'result'))
@@ -1006,14 +1018,175 @@ def increments_gaussian():
 
 	ax.legend([r'$\sigma$ = {sigma}'.format(sigma=sigma) for sigma in sigmas])
 
-def whatever():
+def med_rel_err_batch_size():
 
-	d = 20
-	sigma1 = 10
-	sigma2 = 5
-	N = 1000
-	X1 = np.random.randn(N,d)*sigma1
-	X2 = np.random.randn(N,d)*sigma2
+	N0 = 100
+	N1 = 500
+	N2 = 1
+	Bs = np.arange(50,1000,50)
+	batch_trials = 10
 
-	inner_prods = [np.dot(X1[i,:], X2[j,:])/(la.norm(X2[i,:],2)**2) for (i,j) in product(range(N), range(N))]
-	plt.hist(inner_prods)
+	def get_batch_data(batch_size:int):
+		# Gaussian data for now.
+		return np.random.randn(batch_size, N0)
+
+	med_rel_errs = np.zeros(Bs.shape)
+	ninety_fifth_percentiles = np.zeros(Bs.shape)
+	for B_idx, B in enumerate(Bs):
+		for trial_idx in range(batch_trials):
+			model = Sequential()
+			layer1 = Dense(N1, activation=None, use_bias=False, input_dim=N0,
+				kernel_initializer=RandomUniform(-1,1))
+			layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+			model.add(layer1)
+			model.add(layer2)
+
+			my_quant_net = QuantizedNeuralNetwork(model, B, get_batch_data, use_indep_quant_steps=False)
+			logger.info(f"Quantizing network with batchsize = {B} trial {trial_idx}...")
+			my_quant_net.quantize_network()
+			logger.info("done!")
+
+			med_rel_errs[B_idx] += np.median(my_quant_net.layerwise_rel_errs[1])
+			ninety_fifth_percentiles[B_idx] += np.percentile(my_quant_net.layerwise_rel_errs[1], 95)
+
+		# Divide by number of trials to average.
+		med_rel_errs[B_idx] = med_rel_errs[B_idx]/batch_trials
+		ninety_fifth_percentiles[B_idx] = ninety_fifth_percentiles[B_idx]/batch_trials
+
+
+	fig, ax = plt.subplots(1,1, figsize=(10,10))
+	caption = "Caption: Percentiles are taken across all neurons in this layer's weight matrix. " \
+	f"For each batch size, we averaged the percentile over {batch_trials} trials to account for variation in data. " \
+	"Note that these errors are computed on the data that are used to choose the bits."
+	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
+	fig.suptitle(rf"Second Layer Average Percentiles of Relative Errors: $(N_1, N_2)$ = ({N1}, {N2})", fontsize=18)
+	ax.set_xlabel("Batch Size", fontsize=14)
+	ax.set_ylabel("Median Relative Error", fontsize=14)
+	ax.plot(Bs, med_rel_errs, '-o')
+	# ax.plot(Bs, ninety_fifth_percentiles, '-o')
+	# ax.legend(["Median", r"$95^{th}$ Percentile"]))
+
+def med_rel_err_N():
+
+	N0s = 100
+	N1s = np.arange(100, 1001, 100)
+	N2 = 1
+	B = 100
+	N1_trials = 10
+
+	def get_batch_data(batch_size:int, N0: int):
+		# Gaussian data for now.
+		return np.random.randn(batch_size, N0)
+
+	med_rel_errs = np.zeros(N1s.shape)
+	ninety_fifth_percentiles = np.zeros(N1s.shape)
+	for N1_idx, N1 in enumerate(N1s):
+
+		def get_my_batch_data(batch_size:int):
+			return get_batch_data(batch_size, N0)
+
+		for trial_idx in range(N1_trials):
+			model = Sequential()
+			layer1 = Dense(N1, activation=None, use_bias=False, input_dim=N0,
+				kernel_initializer=RandomUniform(-1,1))
+			layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+			model.add(layer1)
+			model.add(layer2)
+
+			my_quant_net = QuantizedNeuralNetwork(model, B, get_my_batch_data, use_indep_quant_steps=False)
+			logger.info(f"Quantizing network with N1 = {N1} trial {trial_idx}...")
+			my_quant_net.quantize_network()
+			logger.info("done!")
+
+			med_rel_errs[N1_idx] += np.median(my_quant_net.layerwise_rel_errs[1])
+			ninety_fifth_percentiles[N1_idx] += np.percentile(my_quant_net.layerwise_rel_errs[1], 95)
+
+		# Divide by number of trials to average.
+		med_rel_errs[N1_idx] = med_rel_errs[N1_idx]/N1_trials
+		ninety_fifth_percentiles[N1_idx] = ninety_fifth_percentiles[N1_idx]/N1_trials
+
+
+	fig, ax = plt.subplots(1,1, figsize=(10,10))
+	caption = "Caption: Percentiles are taken across all neurons in this layer's weight matrix. " \
+	f"For each value of N1, we averaged the percentile over {N1_trials} trials to account for variation in data. " \
+	"Note that these errors are computed on the data that are used to choose the bits."
+	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
+	fig.suptitle(rf"Second Layer Average Median Relative Errors: $(N_2, B)$ = ({N2}, {B})", fontsize=18)
+	ax.set_xlabel(r"$N_1$", fontsize=14)
+	ax.set_ylabel("Relative Error", fontsize=14)
+	ax.plot(N1s, med_rel_errs, '-o')
+	# ax.plot(N0s, ninety_fifth_percentiles, '-o')
+	# ax.legend(["Median", r"$95^{th}$ Percentile"])
+
+def out_of_sample_rel_err():
+
+	N0 = 10
+	# N0s = np.arange(100, 1001, 100)
+	# N1 = 1000
+	N1s = np.arange(100, 1001, 100)
+	N2 = 1
+	# Bs = np.arange(50,1000,50)
+	B = 50
+	num_trials = 10
+	layer_idx = 1
+	def get_batch_data(batch_size:int, N0: int):
+		# Gaussian data for now.
+		return np.random.randn(batch_size, N0)
+
+
+	med_rel_errs = np.zeros(N1s.shape)
+	ninety_fifth_percentiles = np.zeros(N1s.shape)
+	for N1_idx, N1 in enumerate(N1s):
+
+		def get_my_batch_data(batch_size:int):
+			return get_batch_data(batch_size, N0)
+
+		for trial_idx in range(num_trials):
+			model = Sequential()
+			layer1 = Dense(N1, activation=None, use_bias=False, input_dim=N0,
+				kernel_initializer=RandomUniform(-1,1))
+			layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+			model.add(layer1)
+			model.add(layer2)
+
+			my_quant_net = QuantizedNeuralNetwork(model, B, get_my_batch_data, use_indep_quant_steps=False)
+			logger.info(f"Quantizing network with N1 = {N1} trial {trial_idx}...")
+			my_quant_net.quantize_network()
+			logger.info("done!")
+
+			# Get new data.
+			X = get_my_batch_data(B)
+			q_model = my_quant_net.quantized_net
+			trained_output = Kfunction([model.layers[0].input],
+										[model.layers[layer_idx].output]
+									)
+			quant_output = Kfunction([q_model.layers[0].input],
+									[q_model.layers[layer_idx].output]
+									)
+			wX = trained_output([X])[0]
+			qX = quant_output([X])[0]
+			rel_errs = [la.norm(wX[:, t] - qX[:, t])/la.norm(wX[:,t]) for t in range(N2)]
+
+			med_rel_errs[N1_idx] += np.median(rel_errs)
+			ninety_fifth_percentiles[N1_idx] += np.percentile(rel_errs, 95)
+
+		# Divide by number of trials to average.
+		med_rel_errs[N1_idx] = med_rel_errs[N1_idx]/num_trials
+		ninety_fifth_percentiles[N1_idx] = ninety_fifth_percentiles[N1_idx]/num_trials
+
+
+	fig, ax = plt.subplots(1,1, figsize=(10,10))
+	caption = "Caption: Percentiles are taken across all neurons in this layer's weight matrix. " \
+	f"For each value of N1, we averaged the percentile over {num_trials} trials to account for variation in data. " \
+	"Note that these errors are computed on the data that are independent of those used to choose the bits."
+	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
+	fig.suptitle(rf"Second Layer Average Median OOS Relative Errors: $(N_2, B)$ = ({N2}, {B})", fontsize=18)
+	ax.set_xlabel(r"$N_1$", fontsize=14)
+	ax.set_ylabel("Relative Error", fontsize=14)
+	ax.plot(N1s, med_rel_errs, '-o')
+	# ax.plot(N1s, ninety_fifth_percentiles, '-o')
+	# ax.legend(["Median", r"$95^{th}$ Percentile"])
+
+
+
+
