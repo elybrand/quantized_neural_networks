@@ -1068,7 +1068,7 @@ def med_rel_err_batch_size():
 
 def med_rel_err_N():
 
-	N0s = 100
+	N0 = 100
 	N1s = np.arange(100, 1001, 100)
 	N2 = 1
 	B = 100
@@ -1187,6 +1187,72 @@ def out_of_sample_rel_err():
 	# ax.plot(N1s, ninety_fifth_percentiles, '-o')
 	# ax.legend(["Median", r"$95^{th}$ Percentile"])
 
+def perturbation_analysis():
+
+	N0s = np.arange(100, 1100, 100)
+	N1 = 100
+	N2 = 1
+	batch_size = 10
+	num_trials = 10
+	sigma = 1
+
+	num_diff = np.zeros(len(N0s))
+	rel_errs = np.zeros(len(N0s))
+
+	for N0_idx, N0 in enumerate(N0s):
+		def get_batch_data(batch_size:int):
+			# Gaussian data for now.
+			return np.random.randn(batch_size, N0) * sigma
+		for trial_idx in range(num_trials):
+			logger.info(f"Quantizing network with N0 = {N0} trial {trial_idx}...")
+			model = Sequential()
+			layer1 = Dense(N1, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1), input_dim=N0)
+			layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+			model.add(layer1)
+			model.add(layer2)
+
+			my_quant_net = QuantizedNeuralNetwork(model, batch_size, get_batch_data, is_debug=True)
+			my_quant_net.quantize_network()
+
+			# Now take the quantized directions from this network as well as the weights in the last layer
+			# and use them to quantize a new neural network where there is no perturbation in directions.
+			q_perturbed = my_quant_net.quantized_net.layers[1].weights[0].numpy()
+			w = [my_quant_net.trained_net.layers[1].weights[0].numpy()]
+			qX = my_quant_net.layerwise_directions[1]['qX']
+
+			model2 = Sequential()
+			layer3 = Dense(N2, activation=None, use_bias=False, input_dim=N1)
+			model2.add(layer3)
+			layer3.set_weights(w)
+
+			breakpoint()
+			new_quant_net = QuantizedNeuralNetwork(model2, batch_size, lambda x: qX, is_debug=True)
+			new_quant_net.quantize_network()
+			q_not_perturbed = new_quant_net.quantized_net.layers[0].weights[0].numpy()
+
+			num_diff[N0_idx] += np.sum(q_perturbed != q_not_perturbed)
+			# Take median relative error across directions
+			rel_errs[N0_idx] += np.median(my_quant_net.layerwise_rel_errs[0])
+			logger.info("done!")
+
+		num_diff[N0_idx] = num_diff[N0_idx]/num_trials
+		rel_errs[N0_idx] = rel_errs[N0_idx]/num_trials
+
+	fig, axes = plt.subplots(1,2, figsize=(20,10))
+	axes[0].set_title(rf"Number of Bits that Differ, ($N_1$, B, $\sigma$) = ({N1}, {batch_size}, {sigma})", fontsize=22)
+	axes[0].set_xlabel(r"$N_0$", fontsize=18)
+	axes[0].set_ylabel("Number of Bits Different", fontsize=18)
+	# ax.set_ylim(0,1)
+	axes[0].plot(N1s, num_diff, '-o')
+	caption = "Caption: Bits were taken with two dynamical systems with the same output neuron (uniform weights) and same directions." \
+	" For each value of N0, we looked at the bit string obtained where the two directions differ and the bit string where the directions were the same. " \
+	f"We then calculated the number of bits that differed between these two bit strings. These numbers were averaged over {num_trials} trials."
+	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
+
+	axes[1].set_title("Relative Error in Directions", fontsize=22)
+	axes[1].set_xlabel(r"$N_0$", fontsize=18)
+	axes[1].set_ylabel("Relative Error", fontsize=18)
+	axes[1].plot(N0s, rel_errs, '-o')
 
 
 

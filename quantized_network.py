@@ -15,7 +15,7 @@ QuantizedNeuron = namedtuple("QuantizedNeuron", ['layer_idx', 'neuron_idx', 'q',
 
 class QuantizedNeuralNetwork():
 
-	def __init__(self, network: Sequential, batch_size: int, get_batch_data: Callable[[int], array], use_indep_quant_steps=True):
+	def __init__(self, network: Sequential, batch_size: int, get_batch_data: Callable[[int], array], use_indep_quant_steps=False, is_debug=False):
 		"""
 		CAVEAT: No bias terms for now!
 		REMEMBER: TensorFlow flips everything for you. Networks act via
@@ -71,6 +71,23 @@ class QuantizedNeuralNetwork():
 								) 
 					for layer_idx, weight_matrix in enumerate(network.get_weights())
 				}
+		self.is_debug = is_debug
+
+		# This is used to log the directions which are used to choose the bits.
+		if self.is_debug:
+			self.layerwise_directions = {
+				layer_idx: { 'wX': zeros(				
+							(self.batch_size, # B vectors in each batch
+							weight_matrix.shape[0]) # N_ell dimensional feature
+							),
+							'qX':zeros(				
+							(self.batch_size, # B vectors in each batch
+							weight_matrix.shape[0]) # N_ell dimensional feature
+							),
+							}
+				for layer_idx, weight_matrix in enumerate(network.get_weights())
+			}
+
 
 	def bit_round(self, t: float) -> int:
 		if abs(t) < 1/2:
@@ -135,6 +152,11 @@ class QuantizedNeuralNetwork():
 				# Only take the output of the neuron_idx neuron.
 				wX[:, neuron_idx] = prev_trained_output([wBatch])[0][:, neuron_idx]
 				qX[:, neuron_idx] = prev_quant_output([qBatch])[0][:, neuron_idx]
+
+		# If you're debugging, log wX and qX.
+		if self.is_debug:
+			self.layerwise_directions[layer_idx]['wX'] = wX
+			self.layerwise_directions[layer_idx]['qX'] = qX
 
 		# Now quantize the neurons. This is parallelizable if you wish to make it so.
 		for neuron_idx in range(N_ell_plus_1):
