@@ -1189,20 +1189,29 @@ def out_of_sample_rel_err():
 
 def perturbation_analysis():
 
-	N0s = np.arange(100, 1100, 100)
+	N0_min = 100
+	N0_max = 2100
+	N0s = np.arange(N0_min, N0_max, 100)
 	N1 = 100
 	N2 = 1
-	batch_size = 10
-	num_trials = 10
+
+	# Use a finite sample gaussian. This way you don't need to worry about generalization bounds
+	distribution_size = 10
+	batch_size = 5*distribution_size
+	num_trials = 20
 	sigma = 1
 
 	num_diff = np.zeros(len(N0s))
 	rel_errs = np.zeros(len(N0s))
 
 	for N0_idx, N0 in enumerate(N0s):
+
+		empirical_distribution = np.random.randn(distribution_size, N0)*sigma
 		def get_batch_data(batch_size:int):
-			# Gaussian data for now.
-			return np.random.randn(batch_size, N0) * sigma
+			indices = np.random.choice(np.arange(0, empirical_distribution.shape[0], 1), batch_size, replace=True)
+			return empirical_distribution[indices,:]
+
+
 		for trial_idx in range(num_trials):
 			logger.info(f"Quantizing network with N0 = {N0} trial {trial_idx}...")
 			model = Sequential()
@@ -1225,7 +1234,6 @@ def perturbation_analysis():
 			model2.add(layer3)
 			layer3.set_weights(w)
 
-			breakpoint()
 			new_quant_net = QuantizedNeuralNetwork(model2, batch_size, lambda x: qX, is_debug=True)
 			new_quant_net.quantize_network()
 			q_not_perturbed = new_quant_net.quantized_net.layers[0].weights[0].numpy()
@@ -1243,10 +1251,11 @@ def perturbation_analysis():
 	axes[0].set_xlabel(r"$N_0$", fontsize=18)
 	axes[0].set_ylabel("Number of Bits Different", fontsize=18)
 	# ax.set_ylim(0,1)
-	axes[0].plot(N1s, num_diff, '-o')
+	axes[0].plot(N0s, num_diff, '-o')
 	caption = "Caption: Bits were taken with two dynamical systems with the same output neuron (uniform weights) and same directions." \
 	" For each value of N0, we looked at the bit string obtained where the two directions differ and the bit string where the directions were the same. " \
-	f"We then calculated the number of bits that differed between these two bit strings. These numbers were averaged over {num_trials} trials."
+	f"We then calculated the number of bits that differed between these two bit strings. These numbers were averaged over {num_trials} trials." \
+	f" The distribution of directions was taken to be a finite sample of {distribution_size} Gaussians with variance {sigma**2}."
 	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
 
 	axes[1].set_title("Relative Error in Directions", fontsize=22)
