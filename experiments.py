@@ -1189,31 +1189,32 @@ def out_of_sample_rel_err():
 
 def perturbation_analysis():
 
-	N0_min = 100
-	N0_max = 2100
-	N0s = np.arange(N0_min, N0_max, 100)
-	N1 = 100
+	# N0_min = 100
+	# N0_max = 2100
+	# N0s = np.arange(N0_min, N0_max, 100)
+	N0 = 200
+	# N1 = 100
+	N1s = np.arange(200, 1500, 100)
 	N2 = 1
 
 	# Use a finite sample gaussian. This way you don't need to worry about generalization bounds
 	distribution_size = 10
 	batch_size = 5*distribution_size
-	num_trials = 20
+	num_trials = 10
 	sigma = 1
 
-	num_diff = np.zeros(len(N0s))
-	rel_errs = np.zeros(len(N0s))
+	empirical_distribution = np.random.randn(distribution_size, N0)*sigma
+	def get_batch_data(batch_size:int):
+		indices = np.random.choice(np.arange(0, empirical_distribution.shape[0], 1), batch_size, replace=True)
+		return empirical_distribution[indices,:]
 
-	for N0_idx, N0 in enumerate(N0s):
+	num_diff = np.zeros(len(N1s))
+	# rel_errs = np.zeros(len(N1s))
 
-		empirical_distribution = np.random.randn(distribution_size, N0)*sigma
-		def get_batch_data(batch_size:int):
-			indices = np.random.choice(np.arange(0, empirical_distribution.shape[0], 1), batch_size, replace=True)
-			return empirical_distribution[indices,:]
-
+	for N1_idx, N1 in enumerate(N1s):
 
 		for trial_idx in range(num_trials):
-			logger.info(f"Quantizing network with N0 = {N0} trial {trial_idx}...")
+			logger.info(f"Quantizing network with N1 = {N1} trial {trial_idx}...")
 			model = Sequential()
 			layer1 = Dense(N1, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1), input_dim=N0)
 			layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
@@ -1238,30 +1239,31 @@ def perturbation_analysis():
 			new_quant_net.quantize_network()
 			q_not_perturbed = new_quant_net.quantized_net.layers[0].weights[0].numpy()
 
-			num_diff[N0_idx] += np.sum(q_perturbed != q_not_perturbed)
+			num_diff[N1_idx] += np.sum(q_perturbed != q_not_perturbed)
 			# Take median relative error across directions
-			rel_errs[N0_idx] += np.median(my_quant_net.layerwise_rel_errs[0])
+			# rel_errs[N1_idx] += np.median(my_quant_net.layerwise_rel_errs[0])
 			logger.info("done!")
 
-		num_diff[N0_idx] = num_diff[N0_idx]/num_trials
-		rel_errs[N0_idx] = rel_errs[N0_idx]/num_trials
+		num_diff[N1_idx] = num_diff[N1_idx]/(num_trials)
+		# rel_errs[N0_idx] = rel_errs[N0_idx]/num_trials
 
-	fig, axes = plt.subplots(1,2, figsize=(20,10))
-	axes[0].set_title(rf"Number of Bits that Differ, ($N_1$, B, $\sigma$) = ({N1}, {batch_size}, {sigma})", fontsize=22)
-	axes[0].set_xlabel(r"$N_0$", fontsize=18)
-	axes[0].set_ylabel("Number of Bits Different", fontsize=18)
+	# fig, axes = plt.subplots(1,2, figsize=(20,10))
+	fig, axes = plt.subplots(1,1, figsize=(10,10))
+	axes.set_title(rf"Number of Bits that Differ, ($N_0$, B, $\sigma$) = ({N0}, {batch_size}, {sigma})", fontsize=22)
+	axes.set_xlabel(r"$N_1$", fontsize=18)
+	axes.set_ylabel("Number of Bits Different", fontsize=18)
 	# ax.set_ylim(0,1)
-	axes[0].plot(N0s, num_diff, '-o')
+	axes.plot(N1s, num_diff, '-o')
 	caption = "Caption: Bits were taken with two dynamical systems with the same output neuron (uniform weights) and same directions." \
-	" For each value of N0, we looked at the bit string obtained where the two directions differ and the bit string where the directions were the same. " \
+	" For each value of N1, we looked at the bit string obtained where the two directions differ and the bit string where the directions were the same. " \
 	f"We then calculated the number of bits that differed between these two bit strings. These numbers were averaged over {num_trials} trials." \
 	f" The distribution of directions was taken to be a finite sample of {distribution_size} Gaussians with variance {sigma**2}."
 	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
 
-	axes[1].set_title("Relative Error in Directions", fontsize=22)
-	axes[1].set_xlabel(r"$N_0$", fontsize=18)
-	axes[1].set_ylabel("Relative Error", fontsize=18)
-	axes[1].plot(N0s, rel_errs, '-o')
+	# axes[1].set_title("Relative Error in Directions", fontsize=22)
+	# axes[1].set_xlabel(r"$N_0$", fontsize=18)
+	# axes[1].set_ylabel("Relative Error", fontsize=18)
+	# axes[1].plot(N0s, rel_errs, '-o')
 
 
 
