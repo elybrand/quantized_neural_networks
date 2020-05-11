@@ -183,35 +183,6 @@ class CustomWalk(Walk):
 		self.w = w
 		super().quantize(u_init=u_init)
 
-class HiddenLayerWalk(Walk):\
-
-		def __init__(self, wX: np.array, qX: np.array, w: np.array, u_init: Optional[np.array]=None):
-		"""
-		Constructs two random walks, one with directions wX the other with qX, and step parameters w_t.
-		"""
-			N, d  = wX.shape
-			self.wX = wX
-			self.qX = qX
-			self.w = w
-			self.q = np.zeros(N)
-			self.U = np.zeros((N,d))
-
-		def quantize_weight(self, w: np.float, u: np.array, X: np.array, X_tilde: np.array):
-			self.bit_round(np.dot(X_tilde, u + w*X)/(la.norm(X_tilde,2)**2))
-
-		def quantize(self, u_init: Optiona[np.array]=None):
-
-			N, d = self.U.shape
-			if u_init is None:
-				u_init = np.zeros(N)
-			self.q[0] = self.quantize_weight(self.w[0], u_init, self.wX[0,:], self.qX[0,:])
-			self.U[0,:] = u_init + self.w[0]*self.wX[0,:] - self.q[0]*self.qX[0,:]
-
-			for t in range(1,N):
-				self.q[t] = self.quantize_weight(self.w[t], self.U[t-1,:], self.wX[t,:], self.qX[t,:])
-				self.U[t,:] = self.U[t-1,:] + self.w[t]*self.wX[t,:] - self.q[t]*self.qX[t,:]
-			
-
 # Function wrapper to display what tuple (N,d) a given experiment is on.
 def display_progress(func):
 	def display_and_call(*args, **kwargs):
@@ -753,10 +724,11 @@ def init_residual_experiment():
 	axes[0].set_xlabel("Step Index $i$", fontsize=14)
 	axes[0].set_ylabel("$||u_i||$", fontsize=14)
 
-	axes[1].plot(range(1,N), [la.norm(walk.U[i], 2) - la.norm(walk.U[i-1], 2) for i in range(1,N)], 'o')
+	axes[1].plot(range(1,N), [la.norm(walk.U[i], 2)**2 - la.norm(walk.U[i-1], 2)**2 for i in range(1,N)], 'o')
 	axes[1].set_title("Change in Norm of Residuals", fontsize=18)
 	axes[1].set_xlabel("Step Index $i$", fontsize=14)
-	axes[1].set_ylabel("$\Delta ||u_i||$", fontsize=14)
+	axes[1].set_ylabel("$\Delta ||u_i||^2$", fontsize=14)
+
 
 def mean_drift_experiment():
 
@@ -999,7 +971,7 @@ def increments_gaussian():
 
 	d = 20
 	N = 100000
-	sigmas = [1,2, 3]
+	sigmas = [1]
 
 	fig, ax = plt.subplots(1,1, figsize=(10,10))
 	ax.set_title("Increments", fontsize=24)
@@ -1012,9 +984,14 @@ def increments_gaussian():
 		q = mywalk.q
 		U = mywalk.U
 		increments = np.zeros(N)
+		bounds = [(la.norm(X[t,:], 2)**2)/4 for t in range(N)]
 		increments[0] = (w[0]-q[0])**2
 		increments[1:] = [(w[i]-q[i])**2  + 2*(w[i] - q[i])*np.dot(X[i,:]/ la.norm(X[i,:],2)**2, U[i-1,:]) for i in range(1,N)]
-		ax.hist(increments, alpha=0.3)
+	
+	ax.plot(range(N), increments, '-o')
+	ax.plot(range(N), bounds, '-o')
+	ax.legend(["increments", "upper bound"])
+
 
 	ax.legend([r'$\sigma$ = {sigma}'.format(sigma=sigma) for sigma in sigmas])
 
@@ -1269,6 +1246,84 @@ def perturbation_analysis():
 	# axes[1].set_xlabel(r"$N_0$", fontsize=18)
 	# axes[1].set_ylabel("Relative Error", fontsize=18)
 	# axes[1].plot(N0s, rel_errs, '-o')
+
+def increments_hidden_layer():
+
+	N0 = 100
+	N1 = 10**4
+	N2=1
+
+	distribution_size = 10
+	batch_size = 3 * distribution_size
+	# Use unit vectors.
+	empirical_distribution = np.random.randn(distribution_size, N0)
+	empirical_distribution = np.array([sample/la.norm(sample, 2) for sample in empirical_distribution])
+
+	def get_batch_data(int) -> np.array:
+		indices = np.random.choice(np.arange(0, distribution_size, 1), batch_size, replace=True)
+		return empirical_distribution[indices,:]
+
+
+	model = Sequential()
+	layer1 = Dense(N1, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1), input_dim=N0)
+	layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+	model.add(layer1)
+	model.add(layer2)
+
+	my_quant_net = QuantizedNeuralNetwork(model, batch_size, get_batch_data, is_debug=True)
+	my_quant_net.quantize_network()
+
+	# Below is the list of the increments in the hidden layer for the Lyapunov function ||u_t||^2
+	U = my_quant_net.residuals[1][0]
+	w = my_quant_net.trained_net.weights[1].numpy()
+	q = my_quant_net.quantized_net.weights[1].numpy()
+	wXs = my_quant_net.layerwise_directions[1]['wX']
+	qXs = my_quant_net.layerwise_directions[1]['qX']
+	increments = [la.norm(w[0] * wXs[:, 0] - q[0] * qXs[:, 0], 2)**2] + \
+				[
+					la.norm(w[t] * wXs[:, t] - q[t] * qXs[:, t], 2)**2 + 2*np.dot(w[t] * wXs[:, t] - q[t] * qXs[:, t], U[t-1,:])
+					for t in range(1, N1)
+				]
+
+	# This is supposed to correspond to ||u_t||^2 - ||u_{t-1} + w_t DX_t||_2^2. This, by analogy to first layer, should be uniformly bounded...I think.
+	almost_increments = [la.norm(w[0] * wXs[:, 0] - q[0] * qXs[:, 0], 2)**2] + \
+				[
+					la.norm((w[t] - q[t]) * qXs[:, t], 2)**2 + 2*np.dot((w[t] - q[t]) * qXs[:, t], U[t-1,:] + w[t] * (wXs[:, t]-qXs[:, t]))
+					for t in range(1, N1)
+				]
+
+	max_qX_norm = max([(la.norm(qXs[:,t], 2)**2) for t in range(N1)])
+	fig, axes = plt.subplots(2,2, figsize=(20,12))
+	fig.suptitle("Hidden Layer Dashboard", fontsize=24)
+	axes[0,0].set_title(f"Lyapunov Increments", fontsize=15)
+	axes[0,0].set_xlabel("t", fontsize=18)
+	# axes[0,0].set_ylabel(r"$\Delta ||u_t||_2^2$", fontsize=18)
+	axes[0,0].plot(range(N1), np.array(increments) - np.array([max_qX_norm/4 for t in range(N1)]))
+	axes[0,0].legend([r"$\Delta ||u_t||_2^2$ - Upper Bound", "Putative Upper Bound"], fontsize=14)
+
+	axes[0,1].set_title(f"Norm of Residual", fontsize=15)
+	axes[0,1].set_xlabel("t", fontsize=18)
+	axes[0,1].set_ylabel(r"$||u_t||_2^2$", fontsize=18)
+	axes[0,1].plot(range(N1), [la.norm(U[t,:],2)**2 for t in range(N1)])
+
+	axes[1,0].set_title(f"Cross Terms in Lyapunov Increments", fontsize=15)
+	axes[1,0].set_xlabel("t", fontsize=18)
+	axes[1,0].plot(range(N1), [w[t] * np.dot( wXs[:,t] - qXs[:,t], U[t,:]) for t in range(N1)], alpha=0.5)
+	axes[1,0].plot(range(N1), [0] + [np.dot((w[t]-q[t])*qXs[:,t], U[t-1,:]) for t in range(1,N1)], alpha=0.5)
+	axes[1,0].legend([r"$\langle w_t \Delta X_t, u_{t-1} \rangle$", r"$\langle (w_t-q_t) \tilde{X}_t, u_{t-1} \rangle$"], fontsize=12)
+
+	axes[1,1].set_title(f"Directional Quadratic Covariation", fontsize=15)
+	axes[1,1].set_xlabel("t", fontsize=18)
+	axes[1,1].set_ylabel(r"$||\Delta X_t||_2^2$", fontsize=18)
+	axes[1,1].plot(range(N1), [la.norm(wXs[:,t] - qXs[:,t],2)**2 for t in range(N1)])
+
+
+
+	caption = f"Caption: Increments and residual plots for the hidden layer of a network with topology (N0, N1, N2) = ({N0}, {N1}, {N2}). "\
+	f"The data population (i.e. rows of X) is an empirical distribution of {distribution_size} samples of uniformly distributed unit vectors in dimension {N0}. "\
+	f"The weights in the analog network are uniformly distributed in [-1,1]."
+	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
+
 
 
 
