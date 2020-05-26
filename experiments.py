@@ -1324,6 +1324,156 @@ def increments_hidden_layer():
 	f"The weights in the analog network are uniformly distributed in [-1,1]."
 	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
 
+def subspace_distribution_first_layer_training_err():
 
+	N0 = 100
+	N1 = 1
+	N2=0
+	d = 10
+	# Subspace encoded in A
+	A = np.random.randn(d,N0)
+	Bs = np.arange(20,1001, 20)
+	num_trials = 50
 
+	def get_batch_data(B:int):
+		F = np.random.randn(B,d)
+		return F@A
 
+	# First, let's see if increasing batch size increases the absolute training error.
+	abs_train_err_Bs = np.zeros(Bs.shape)
+	for B_idx, B in enumerate(Bs):
+		for trial_idx in np.arange(num_trials):
+
+			logger.info(f"Quantizing network with B={B} trial number {trial_idx}...")
+
+			model = Sequential()
+			layer1 = Dense(N1, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1), input_dim=N0)
+			# layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+			model.add(layer1)
+			# model.add(layer2)
+
+			my_quant_net = QuantizedNeuralNetwork(model, B, get_batch_data, is_debug=True)
+			my_quant_net.quantize_network()
+
+			X = my_quant_net.layerwise_directions[0]['wX']
+			w = my_quant_net.trained_net.weights[0].numpy()
+			q = my_quant_net.quantized_net.weights[0].numpy()
+
+			abs_train_err_Bs[B_idx] += la.norm(np.dot(X, w-q))
+
+			logger.info("done!")
+
+		abs_train_err_Bs[B_idx] = abs_train_err_Bs[B_idx]/num_trials
+
+	fig, ax = plt.subplots(1,1, figsize=(10,10))
+	fig.suptitle(f"Absolute Training Error for Fixed Subspace Model vs Batch Size",fontsize=20)
+	ax.set_xlabel("B", fontsize=18)
+	ax.set_ylabel(r"$||X(w-q)||$", fontsize=18)
+	ax.plot(Bs, abs_train_err_Bs, '-o')
+	caption = f"Caption: Absolute training error for first layer of a network with topology (N0, N1, N2) = ({N0}, {N1}, {N2}). "\
+	f"The data population (i.e. rows of X) is assumed to be of the form X=FA, A is fixed N(0,1) {d}x{N0} matrix and F is Bx{d} N(0,1) matrix. "\
+	f"The weights in the analog network are uniformly distributed in [-1,1]. Errors averaged over {num_trials} trials."
+	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
+
+def subspace_distribution_first_layer_generalization_err():
+
+	N0 = 100
+	N1 = 1
+	N2=0
+	d = 10
+	# Subspace encoded in A
+	A = np.random.randn(d,N0)
+	Bs = np.arange(1,30)
+	num_trials = 100
+
+	def get_batch_data(B:int):
+		F = np.random.randn(B,d)
+		return F@A
+
+	# First, let's see if increasing batch size increases the absolute training error.
+	gen_err_Bs = np.zeros(Bs.shape)
+	for B_idx, B in enumerate(Bs):
+		for trial_idx in np.arange(num_trials):
+
+			logger.info(f"Quantizing network with B={B} trial number {trial_idx}...")
+
+			model = Sequential()
+			layer1 = Dense(N1, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1), input_dim=N0)
+			# layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+			model.add(layer1)
+			# model.add(layer2)
+
+			my_quant_net = QuantizedNeuralNetwork(model, B, get_batch_data, is_debug=True)
+			my_quant_net.quantize_network()
+
+			# Draw a new sample.
+			x = get_batch_data(1)
+			w = my_quant_net.trained_net.weights[0].numpy()
+			q = my_quant_net.quantized_net.weights[0].numpy()
+
+			gen_err_Bs[B_idx] += la.norm(np.dot(x, w-q))
+
+			logger.info("done!")
+
+		gen_err_Bs[B_idx] = gen_err_Bs[B_idx]/num_trials
+
+	fig, ax = plt.subplots(1,1, figsize=(10,10))
+	fig.suptitle(f"Generalization Error for Fixed Subspace Model vs Training Batch Size",fontsize=20)
+	ax.set_xlabel("B", fontsize=18)
+	ax.set_ylabel(r"$E||x^T(w-q)||$", fontsize=18)
+	# ax.set_ylim([0,5])
+	ax.plot(Bs, gen_err_Bs, '-o')
+	caption = f"Caption: Absolute generalization error for first layer of a network with topology (N0, N1, N2) = ({N0}, {N1}, {N2}). "\
+	f"The training data population (i.e. rows of X) is assumed to be of the form X=FA, A is fixed N(0,1) {d}x{N0} matrix and F is Bx{d} N(0,1) matrix. "\
+	f"The weights in the analog network are uniformly distributed in [-1,1]. Generalization errors averaged over {num_trials} trials."
+	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
+
+def unconstrained_first_layer_generalization_err():
+	N0 = 100
+	N1 = 1
+	N2=0
+	d=N0
+	Bs = np.arange(5,101, 5)
+	num_trials = 100
+
+	def get_batch_data(B:int):
+		return np.random.randn(B,d)
+
+	# Fix the model once and for all.
+	model = Sequential()
+	layer1 = Dense(N1, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1), input_dim=N0)
+	# layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+	model.add(layer1)
+	# model.add(layer2)
+
+	# First, let's see if increasing batch size increases the absolute training error.
+	gen_err_Bs = np.zeros(Bs.shape)
+	for B_idx, B in enumerate(Bs):
+		for trial_idx in np.arange(num_trials):
+
+			logger.info(f"Quantizing network with B={B} trial number {trial_idx}...")
+
+			my_quant_net = QuantizedNeuralNetwork(model, B, get_batch_data, is_debug=True)
+			my_quant_net.quantize_network()
+
+			# Draw a new sample.
+			x = get_batch_data(1)
+			w = my_quant_net.trained_net.weights[0].numpy()
+			q = my_quant_net.quantized_net.weights[0].numpy()
+
+			gen_err_Bs[B_idx] += la.norm(np.dot(x, w-q))
+
+			logger.info("done!")
+
+		gen_err_Bs[B_idx] = gen_err_Bs[B_idx]/num_trials
+
+	fig, ax = plt.subplots(1,1, figsize=(10,10))
+	fig.suptitle(f"Generalization Error for Unconstrained Model vs Training Batch Size",fontsize=20)
+	ax.set_xlabel("B", fontsize=18)
+	ax.set_ylabel(r"$E||x^T(w-q)||$", fontsize=18)
+	# ax.set_ylim([0,5])
+	ax.plot(Bs, gen_err_Bs, '-o')
+	caption = f"Caption: Absolute generalization error for first layer of a network with topology (N0, N1, N2) = ({N0}, {N1}, {N2}). "\
+	f"The training data population (i.e. rows of X) is assumed to be i.i.d. Gaussian, that is, Xij ~ N(0,1), where X is {B}x{N0}."\
+	f"The weights in the analog network are uniformly distributed in [-1,1]. Generalization errors averaged over {num_trials} trials."
+	fig.text(0.5, 0.01, caption, ha='center', wrap=True, fontsize=12)
