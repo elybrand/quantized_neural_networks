@@ -15,7 +15,7 @@ QuantizedNeuron = namedtuple("QuantizedNeuron", ['layer_idx', 'neuron_idx', 'q',
 
 class QuantizedNeuralNetwork():
 
-	def __init__(self, network: Sequential, batch_size: int, get_batch_data: Callable[[int], array], use_indep_quant_steps=False, is_debug=False):
+	def __init__(self, network: Sequential, batch_size: int, get_batch_data: Callable[[int], array], is_debug=False):
 		"""
 		CAVEAT: No bias terms for now!
 		REMEMBER: TensorFlow flips everything for you. Networks act via
@@ -49,8 +49,6 @@ class QuantizedNeuralNetwork():
 		self.quantized_net = clone_model(network) 
 
 		self.batch_size = batch_size
-
-		self.use_indep_quant_steps = use_indep_quant_steps
 
 		# A dictionary with key being the layer index ell and the values being tensors.
 		# self.residuals[ell][neuron_idx, :] is a N_ell x batch_size matrix storing the residuals
@@ -146,7 +144,7 @@ class QuantizedNeuralNetwork():
 			for neuron_idx in range(N_ell):
 
 				wBatch = self.get_batch_data(self.batch_size)
-				qBatch = self.get_batch_data(self.batch_size) if self.use_indep_quant_steps else wBatch
+				qBatch = wBatch
 
 				# Remember, neurons correspond to columns in the weight matrix.
 				# Only take the output of the neuron_idx neuron.
