@@ -2,9 +2,11 @@ from numpy import array, zeros, dot, split, cumsum
 from numpy.random import permutation, randn
 from scipy.linalg import norm
 from keras.backend import function as Kfunction
-from keras.models import Sequential, clone_model
+from keras.models import Sequential, Model, clone_model
 from keras.layers import Dense
-from typing import Optional, Callable
+from tensorflow.image import extract_patches
+from tensorflow import reshape
+from typing import Optional, Callable, List
 from collections import namedtuple
 from matplotlib.pyplot import subplots
 from matplotlib.axes import Axes
@@ -12,10 +14,12 @@ from matplotlib.axes import Axes
 
 
 QuantizedNeuron = namedtuple("QuantizedNeuron", ['layer_idx', 'neuron_idx', 'q', 'U'])
+QuantizedFilter = namedtuple("QuantizedFilter", ['layer_idx', 'filter_idx', 'channel_idx', 'q_filtr', 'U'])
+SegmentedData = namedtuple("SegmentedData", ['wX_seg', 'qX_seg'])
 
 class QuantizedNeuralNetwork():
 
-	def __init__(self, network: Sequential, batch_size: int, get_batch_data: Callable[[int], array], is_debug=False):
+	def __init__(self, network: Model, batch_size: int, get_batch_data: Callable[[int], array], is_debug=False):
 		"""
 		CAVEAT: No bias terms for now!
 		REMEMBER: TensorFlow flips everything for you. Networks act via
@@ -248,6 +252,88 @@ class QuantizedNeuralNetwork():
 		q_hist.hist(Q.flatten())
 
 		return axes
+
+class QuantizedCNN(QuantizedNeuralNetwork):
+
+	def segment_data2D(kernel_size: tuple, strides: tuple, padding, wX: array, qX: array) -> SegmentedData:
+		# We need to format these variables so that tensorflow can interpret them
+		# for a list of images.
+		kernel_sizes_list = [1, kernel_size[0], kernel_size[1], 1]
+		strides_list = [1, strides[0], strides[1], 1]
+		# Not entirely confident about this rates variable, but let's go with it.
+		rates = [1, 1, 1, 1]
+
+		# The output of extract_patches is indexed by (batch, row, column).
+		# wX_seg[i,, x, y] is the *flattened* patch for batch i at the xth row stride and the yth column stride.
+		# Since we're just dealing with one batch each, and we don't particularly care about the ordering
+		# of the patches, we'll just flatten it all into a 2D tensor.
+		wX_seg = extract_patches(images=wX,
+								sizes=kernel_sizes_list,
+								strides=strides_list,
+								rates=rates,
+								padding=padding)
+		qX_seg = extract_patches(images=qX,
+								sizes=kernel_sizes_list,
+								strides=strides_list,
+								rates=rates,
+								padding=padding)
+
+		new_shape = (wX_seg.shape[1]*wX_seg.shape[2], wX_seg.shape[3])
+		wX_seg = reshape(wX_seg, new_shape).numpy()
+		qX_seg = reshape(qX_seg, new_shape).numpy()
+
+		return SegmentedData(wX_seg=wX_seg, qX_seg=qX_seg)
+
+
+	def quantize_filter2D(self, layer_idx: int, filter_idx: int, wX: array, qX: array) -> List[QuantizedFilter]:
+
+		# Each channel has its own filter, so we need to split by channel. We assume the number of channels 
+		# is the last dimension in the tensor.
+		num_channels = wX.shape[-1]
+		layer = model.layers[layer_idx]
+		kernel_size = layer.kernel_size
+		strides = layer.strides
+		padding = layer.padding
+		quantized_filter_list = []
+		for channel_idx in range(num_channels):
+
+			# Segment the data into patches.
+			channel_wX = wX[:,:,:,channel_idx]
+			channel_qX = qX[:,:,:,channel_idx]
+
+			seg_data = segment_data2D(kernel_size, strides, padding, channel_wX, channel_qX)
+			channel_wX_patches = seg_data.wX_seg
+			channel_qX_patches = seg_data.qX_seg
+
+			filtr = layer.get_weights()[0][:,:,:,filter_idx][:,:,channel_idx]
+			# Flatten the filter.
+			filtr = reshape(filtr, filtr.size)
+			# Now quantize the filter as if it were a neuron in a perceptron, i.e. a column vector.
+			# Here, B represents the patch batch (!) size.
+			B = seg_data.wX_seg.shape[0]
+			u_init = zeros(B)
+			q_filtr = zeros(filtr.size)
+			U = zeros((filtr.size, B))
+			q_filtr[0] = super().quantize_weight(filtr[0], u_init, channel_wX_patches[:,0], channel_qX_patches[:,0])
+			U[0,:] = u_init + filtr[0]*channel_wX_patches[:,0] - q_filtr[0]*channel_qX_patches[:,0]
+
+			for t in range(1,filtr.size):
+				q_filtr[t] = super().quantize_weight(filtr[t], U[t-1,:], channel_wX_patches[:,t], channel_qX_patches[:,t])
+				U[t,:] = U[t-1,:] + w[t]*wX[:,t] - q[t]*qX[:,t]
+
+			quantized_filter_list += [QuantizedFilter(layer_idx=layer_idx, filter_idx=filter_idx, channel_idx=channel_idx, q_filtr=q_filtr, U=U)]
+
+		return quantized_filter_list
+
+	def quantize_conv2D_layer(self, layer_idx: int):
+		# wX formatted as an array of images. No flattening.
+		
+		pass
+
+	def quantize_network(self):
+		pass
+
+
 
 
 if __name__ == "__main__":

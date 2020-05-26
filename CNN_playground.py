@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from matplotlib.animation import FuncAnimation
 from itertools import product
 from keras.layers import Dense
-from keras.models import Sequential
+from keras.models import Sequential, Model
 from keras.initializers import RandomUniform
 from keras.backend import function as Kfunction
 from keras.utils.vis_utils import plot_model
@@ -26,7 +26,7 @@ from tensorflow.keras.preprocessing import image
 from tensorflow.keras.applications.resnet50 import preprocess_input, decode_predictions
 
 # Import CNN Model
-model = ResNet50(weights='imagenet')
+model = ResNet50(weights='imagenet') # May not be a good example. It has skips in it to avoid vanishing gradients.
 # Look at the first Conv2D layer
 CNN_layer1 = model.layers[2]
 # Look at the shape. The format should be (dim1, dim2, num_channels (RGB), num_filters)
