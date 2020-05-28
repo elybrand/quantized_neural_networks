@@ -28,9 +28,9 @@ from tensorflow.keras.applications.resnet50 import preprocess_input, decode_pred
 # Import CNN Model
 model = ResNet50(weights='imagenet') # May not be a good example. It has skips in it to avoid vanishing gradients.
 # Look at the first Conv2D layer
-CNN_layer1 = model.layers[2]
+layer = model.layers[2]
 # Look at the shape. The format should be (dim1, dim2, num_channels (RGB), num_filters)
-print(CNN_layer1.get_weights()[0].shape)
+print(layer.get_weights()[0].shape)
 # Use get_config() on the layer to see what the stride, activation, initializer, and so forth are.
-print(CNN_layer1.get_config())
+print(layer.get_config())
 
