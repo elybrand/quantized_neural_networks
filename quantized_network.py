@@ -6,12 +6,10 @@ from keras.models import Sequential, Model, clone_model
 from keras.layers import Dense
 from tensorflow.image import extract_patches
 from tensorflow import reshape
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Generator
 from collections import namedtuple
 from matplotlib.pyplot import subplots
 from matplotlib.axes import Axes
-
-
 
 QuantizedNeuron = namedtuple("QuantizedNeuron", ['layer_idx', 'neuron_idx', 'q', 'U'])
 QuantizedFilter = namedtuple("QuantizedFilter", ['layer_idx', 'filter_idx', 'channel_idx', 'q_filtr', 'U'])
@@ -19,10 +17,12 @@ SegmentedData = namedtuple("SegmentedData", ['wX_seg', 'qX_seg'])
 
 class QuantizedNeuralNetwork():
 
-	def __init__(self, network: Model, batch_size: int, get_batch_data: Callable[[int], array], is_debug=False):
+	def __init__(self, network: Model, batch_size: int, get_batch_data: Generator[array, None, None], is_debug=False):
 		"""
 		CAVEAT: Bias terms are not quantized!
 		REMEMBER: TensorFlow flips everything for you. Networks act via
+
+		#TODO: change get_batch_data to generator
 
 		batch_size x N_ell 	   N_ell x N_{ell+1} 
 
@@ -55,7 +55,7 @@ class QuantizedNeuralNetwork():
 		self.batch_size = batch_size
 
 		# Create a dictionary encoding which layers are Dense, and what their dimensions are.
-		layer_dims = {
+		self.layer_dims = {
 						layer_idx: layer.get_weights()[0].shape for layer_idx, layer in enumerate(network.layers) 
 							if layer.__class__.__name__ == 'Dense'
 					}
@@ -68,7 +68,7 @@ class QuantizedNeuralNetwork():
 										dims[1], # N_{ell+1} neurons,
 										dims[0], # N_{ell} dimensional feature
 										self.batch_size)) 		# Dimension of the residual vectors.
-							for layer_idx, dims in layer_dims.items()
+							for layer_idx, dims in self.layer_dims.items()
 						}
 
 		# Logs the relative error between the data fed through the unquantized network and the
@@ -77,7 +77,7 @@ class QuantizedNeuralNetwork():
 					layer_idx: zeros(
 								dims[0], # N_{ell} dimensional feature,
 								) 
-					for layer_idx, dims in layer_dims.items()
+					for layer_idx, dims in self.layer_dims.items()
 				}
 		self.is_debug = is_debug
 
@@ -93,7 +93,7 @@ class QuantizedNeuralNetwork():
 							dims[0]) # N_ell dimensional feature
 							),
 							}
-				for layer_idx, dims in layer_dims.items()
+				for layer_idx, dims in self.layer_dims.items()
 			}
 
 
@@ -138,7 +138,13 @@ class QuantizedNeuralNetwork():
 		Q = zeros((N_ell, N_ell_plus_1))
 		if layer_idx == 0:
 			# Data are assumed to be independent.
-			wX = self.get_batch_data(self.batch_size)
+			wX = zeros((self.batch_size, N_ell))
+			for sample_idx in range(self.batch_size):
+				try:
+					wX[sample_idx,:] = next(self.get_batch_data)
+				except StopIteration:
+					# No more samples!
+					break
 			qX = wX
 		else:
 			# Define functions which will give you the output of the previous hidden layer
@@ -151,9 +157,15 @@ class QuantizedNeuralNetwork():
 									)
 
 			# Here, we need to loop over the neurons in the previous layer.
+			input_size = self.layer_dims[0][0]
 			for neuron_idx in range(N_ell):
-
-				wBatch = self.get_batch_data(self.batch_size)
+				wBatch = zeros((self.batch_size, input_size))
+				for sample_idx in range(self.batch_size):
+					try:
+						wBatch[sample_idx,:] =next(self.get_batch_data)
+					except StopIteration:
+						# No more samples!
+						break
 				qBatch = wBatch
 
 				# Remember, neurons correspond to columns in the weight matrix.
@@ -186,7 +198,6 @@ class QuantizedNeuralNetwork():
 		this_layer_quant_output = Kfunction([self.quantized_net.layers[layer_idx].input],
 								[self.quantized_net.layers[layer_idx].output]
 								)
-
 		new_wX = this_layer_trained_output([wX])[0]
 		new_qX = this_layer_quant_output([qX])[0]
 		self.layerwise_rel_errs[layer_idx] = [norm(new_wX[:, t] - new_qX[:, t])/norm(new_wX[:,t]) for t in range(N_ell_plus_1)]
@@ -418,8 +429,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 			quantized_filter_list = quantize_filter2D(layer_idx, filter_idx, wX, qX)
 			# Now we need to stack all the channel information together again.
 			N, B = quantized_filter_list.U.shape
-			filter_U = np.zeros((N, B, num_channels))
-			quantized_filter = np.zeros((filter_shape[0], filter_shape[1], num_channels))
+			filter_U = zeros((N, B, num_channels))
+			quantized_filter = zeros((filter_shape[0], filter_shape[1], num_channels))
 			for channel_filter in quantized_filter_list:
 				filter_U[:, :, channel_idx] = channel_filter.U
 				quantized_filter[:,:, channel_idx] = channel_filter.q_filtr

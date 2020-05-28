@@ -1048,21 +1048,19 @@ def med_rel_err_N():
 	N0 = 100
 	N1s = np.arange(100, 501, 100)
 	N2 = 1
-	B = 100
+	B = 10
 	N1_trials = 10
 
-	def get_batch_data(batch_size:int, N0: int):
-		# Gaussian data for now.
-		return np.random.randn(batch_size, N0)
+	data_size = 10**5
+	data_set = np.random.randn(data_size, N0)
 
 	med_rel_errs = np.zeros(N1s.shape)
 	ninety_fifth_percentiles = np.zeros(N1s.shape)
 	for N1_idx, N1 in enumerate(N1s):
 
-		def get_my_batch_data(batch_size:int):
-			return get_batch_data(batch_size, N0)
-
 		for trial_idx in range(N1_trials):
+			# Build a generator to return data samples
+			get_batch_data = (sample for sample in data_set)
 			model = Sequential()
 			layer1 = Dense(N1, activation=None, use_bias=True, input_dim=N0,
 				kernel_initializer=RandomUniform(-1,1))
@@ -1071,7 +1069,7 @@ def med_rel_err_N():
 			model.add(ReLU(max_value=None, negative_slope=0, threshold=0))
 			model.add(layer2)
 
-			my_quant_net = QuantizedNeuralNetwork(model, B, get_my_batch_data)
+			my_quant_net = QuantizedNeuralNetwork(model, B, get_batch_data)
 			logger.info(f"Quantizing network with N1 = {N1} trial {trial_idx}...")
 			my_quant_net.quantize_network()
 			logger.info("done!")

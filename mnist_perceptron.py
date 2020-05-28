@@ -91,6 +91,5 @@ axes[1,1].set_title("Histogram of Third Layer Weights", fontsize=18)
 
 # Now quantize the network
 
-
 print(f'Analog Test loss: {loss:.3}')
 print(f'Analog Test accuracy: {accuracy:.3}')
