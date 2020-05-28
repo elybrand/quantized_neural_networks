@@ -13,7 +13,7 @@ import logging
 from abc import ABC, abstractmethod
 from matplotlib.animation import FuncAnimation
 from itertools import product
-from keras.layers import Dense
+from keras.layers import Dense, ReLU
 from keras.models import Sequential
 from keras.initializers import RandomUniform
 from keras.backend import function as Kfunction
@@ -1068,6 +1068,7 @@ def med_rel_err_N():
 				kernel_initializer=RandomUniform(-1,1))
 			layer2 = Dense(N2, activation=None, use_bias=True, kernel_initializer=RandomUniform(-1,1))
 			model.add(layer1)
+			model.add(ReLU(max_value=None, negative_slope=0, threshold=0))
 			model.add(layer2)
 
 			my_quant_net = QuantizedNeuralNetwork(model, B, get_my_batch_data)
@@ -1075,8 +1076,8 @@ def med_rel_err_N():
 			my_quant_net.quantize_network()
 			logger.info("done!")
 
-			med_rel_errs[N1_idx] += np.median(my_quant_net.layerwise_rel_errs[1])
-			ninety_fifth_percentiles[N1_idx] += np.percentile(my_quant_net.layerwise_rel_errs[1], 95)
+			med_rel_errs[N1_idx] += np.median(my_quant_net.layerwise_rel_errs[2])
+			ninety_fifth_percentiles[N1_idx] += np.percentile(my_quant_net.layerwise_rel_errs[2], 95)
 
 		# Divide by number of trials to average.
 		med_rel_errs[N1_idx] = med_rel_errs[N1_idx]/N1_trials

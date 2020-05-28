@@ -53,8 +53,12 @@ class QuantizedNeuralNetwork():
 		self.quantized_net = clone_model(network) 
 
 		self.batch_size = batch_size
-		# TODO: this assumes every layer has weight matrix...need to ignore auxiliary layers
-		layer_dims = [layer.get_weights()[0].shape for layer in network.layers]
+
+		# Create a dictionary encoding which layers are Dense, and what their dimensions are.
+		layer_dims = {
+						layer_idx: layer.get_weights()[0].shape for layer_idx, layer in enumerate(network.layers) 
+							if layer.__class__.__name__ == 'Dense'
+					}
 
 		# A dictionary with key being the layer index ell and the values being tensors.
 		# self.residuals[ell][neuron_idx, :] is a N_ell x batch_size matrix storing the residuals
@@ -64,7 +68,7 @@ class QuantizedNeuralNetwork():
 										dims[1], # N_{ell+1} neurons,
 										dims[0], # N_{ell} dimensional feature
 										self.batch_size)) 		# Dimension of the residual vectors.
-							for layer_idx, dims in enumerate(layer_dims)
+							for layer_idx, dims in layer_dims.items()
 						}
 
 		# Logs the relative error between the data fed through the unquantized network and the
@@ -73,7 +77,7 @@ class QuantizedNeuralNetwork():
 					layer_idx: zeros(
 								dims[0], # N_{ell} dimensional feature,
 								) 
-					for layer_idx, dims in enumerate(layer_dims)
+					for layer_idx, dims in layer_dims.items()
 				}
 		self.is_debug = is_debug
 
@@ -82,14 +86,14 @@ class QuantizedNeuralNetwork():
 			self.layerwise_directions = {
 				layer_idx: { 'wX': zeros(				
 							(self.batch_size, # B vectors in each batch
-							weight_matrix.shape[0]) # N_ell dimensional feature
+							dims[0]) # N_ell dimensional feature
 							),
 							'qX':zeros(				
 							(self.batch_size, # B vectors in each batch
-							weight_matrix.shape[0]) # N_ell dimensional feature
+							dims[0]) # N_ell dimensional feature
 							),
 							}
-				for layer_idx, weight_matrix in enumerate(network.get_weights())
+				for layer_idx, dims in layer_dims.items()
 			}
 
 
