@@ -21,7 +21,7 @@ class QuantizedNeuralNetwork():
 
 	def __init__(self, network: Model, batch_size: int, get_batch_data: Callable[[int], array], is_debug=False):
 		"""
-		CAVEAT: No bias terms for now!
+		CAVEAT: Bias terms are not quantized!
 		REMEMBER: TensorFlow flips everything for you. Networks act via
 
 		batch_size x N_ell 	   N_ell x N_{ell+1} 
@@ -53,25 +53,27 @@ class QuantizedNeuralNetwork():
 		self.quantized_net = clone_model(network) 
 
 		self.batch_size = batch_size
+		# TODO: this assumes every layer has weight matrix...need to ignore auxiliary layers
+		layer_dims = [layer.get_weights()[0].shape for layer in network.layers]
 
 		# A dictionary with key being the layer index ell and the values being tensors.
 		# self.residuals[ell][neuron_idx, :] is a N_ell x batch_size matrix storing the residuals
 		# generated while quantizing the neuron_idx neuron.
 		self.residuals = {	        
 							layer_idx: zeros((
-										weight_matrix.shape[1], # N_{ell+1} neurons,
-										weight_matrix.shape[0], # N_{ell} dimensional feature
+										dims[1], # N_{ell+1} neurons,
+										dims[0], # N_{ell} dimensional feature
 										self.batch_size)) 		# Dimension of the residual vectors.
-							for layer_idx, weight_matrix in enumerate(network.get_weights())
+							for layer_idx, dims in enumerate(layer_dims)
 						}
 
 		# Logs the relative error between the data fed through the unquantized network and the
 		# quantized network.
 		self.layerwise_rel_errs = {	        
 					layer_idx: zeros(
-								weight_matrix.shape[0], # N_{ell} dimensional feature,
+								dims[0], # N_{ell} dimensional feature,
 								) 
-					for layer_idx, weight_matrix in enumerate(network.get_weights())
+					for layer_idx, dims in enumerate(layer_dims)
 				}
 		self.is_debug = is_debug
 
@@ -107,7 +109,7 @@ class QuantizedNeuralNetwork():
 
 		N_ell = wX.shape[1]
 		u_init = zeros(self.batch_size)
-		w = self.trained_net.get_weights()[layer_idx][:, neuron_idx]
+		w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
 		q = zeros(N_ell)
 		U = zeros((N_ell, self.batch_size))
 		# Take columns of the data matrix, since the samples are given via the rows.
@@ -125,7 +127,7 @@ class QuantizedNeuralNetwork():
 	def quantize_layer(self, layer_idx: int):
 		
 		# Generate independent steps using the batching procedure.
-		N_ell, N_ell_plus_1 = self.trained_net.get_weights()[layer_idx].shape
+		N_ell, N_ell_plus_1 = self.trained_net.layers[layer_idx].get_weights()[0].shape
 		wX = zeros((self.batch_size, N_ell))
 		qX = zeros((self.batch_size, N_ell))
 		# Placeholder for the weight matrix in the quantized network.
@@ -135,7 +137,7 @@ class QuantizedNeuralNetwork():
 			wX = self.get_batch_data(self.batch_size)
 			qX = wX
 		else:
-			# Define functions which will give you the output of the previous hidden layers
+			# Define functions which will give you the output of the previous hidden layer
 			# for both networks.
 			prev_trained_output = Kfunction([self.trained_net.layers[0].input],
 										[self.trained_net.layers[layer_idx-1].output]
@@ -169,8 +171,9 @@ class QuantizedNeuralNetwork():
 			Q[:, neuron_idx] = qNeuron.q
 			self.residuals[layer_idx][neuron_idx,:] = qNeuron.U
 
-		# Update the quantized network.
-		self.quantized_net.layers[layer_idx].set_weights([Q])
+		# Update the quantized network. Use the same bias vector as in the analog network for now.
+		bias = self.trained_net.layers[layer_idx].get_weights()[1]
+		self.quantized_net.layers[layer_idx].set_weights([Q, bias])
 
 		# Log the relative errors in the data incurred by quantizing this layer.
 		this_layer_trained_output = Kfunction([self.trained_net.layers[layer_idx].input],
@@ -187,8 +190,10 @@ class QuantizedNeuralNetwork():
 	def quantize_network(self):
 		
 		# This must be done sequentially.
-		for layer_idx in range(len(self.trained_net.layers)):
-			self.quantize_layer(layer_idx)
+		for layer_idx, layer in enumerate(self.trained_net.layers):
+			# Only quantize dense layers.
+			if layer.__class__.__name__ == 'Dense':
+				self.quantize_layer(layer_idx)
 
 	def neuron_dashboard(self, layer_idx: int, neuron_idx: int) -> Axes:
 

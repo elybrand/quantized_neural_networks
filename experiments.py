@@ -970,7 +970,7 @@ def sigma_vs_q_0():
 def increments_gaussian():
 
 	d = 20
-	N = 100000
+	N = 1000
 	sigmas = [1]
 
 	fig, ax = plt.subplots(1,1, figsize=(10,10))
@@ -1046,7 +1046,7 @@ def med_rel_err_batch_size():
 def med_rel_err_N():
 
 	N0 = 100
-	N1s = np.arange(100, 1001, 100)
+	N1s = np.arange(100, 501, 100)
 	N2 = 1
 	B = 100
 	N1_trials = 10
@@ -1064,13 +1064,13 @@ def med_rel_err_N():
 
 		for trial_idx in range(N1_trials):
 			model = Sequential()
-			layer1 = Dense(N1, activation=None, use_bias=False, input_dim=N0,
+			layer1 = Dense(N1, activation=None, use_bias=True, input_dim=N0,
 				kernel_initializer=RandomUniform(-1,1))
-			layer2 = Dense(N2, activation=None, use_bias=False, kernel_initializer=RandomUniform(-1,1))
+			layer2 = Dense(N2, activation=None, use_bias=True, kernel_initializer=RandomUniform(-1,1))
 			model.add(layer1)
 			model.add(layer2)
 
-			my_quant_net = QuantizedNeuralNetwork(model, B, get_my_batch_data, use_indep_quant_steps=False)
+			my_quant_net = QuantizedNeuralNetwork(model, B, get_my_batch_data)
 			logger.info(f"Quantizing network with N1 = {N1} trial {trial_idx}...")
 			my_quant_net.quantize_network()
 			logger.info("done!")
