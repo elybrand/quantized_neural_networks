@@ -130,7 +130,6 @@ class QuantizedNeuralNetwork():
 
 	def quantize_layer(self, layer_idx: int):
 		
-		# Generate independent steps using the batching procedure.
 		N_ell, N_ell_plus_1 = self.trained_net.layers[layer_idx].get_weights()[0].shape
 		wX = zeros((self.batch_size, N_ell))
 		qX = zeros((self.batch_size, N_ell))
@@ -156,22 +155,18 @@ class QuantizedNeuralNetwork():
 									[self.quantized_net.layers[layer_idx-1].output]
 									)
 
-			# Here, we need to loop over the neurons in the previous layer.
 			input_size = self.layer_dims[0][0]
-			for neuron_idx in range(N_ell):
-				wBatch = zeros((self.batch_size, input_size))
-				for sample_idx in range(self.batch_size):
-					try:
-						wBatch[sample_idx,:] =next(self.get_batch_data)
-					except StopIteration:
-						# No more samples!
-						break
-				qBatch = wBatch
+			wBatch = zeros((self.batch_size, input_size))
+			for sample_idx in range(self.batch_size):
+				try:
+					wBatch[sample_idx,:] =next(self.get_batch_data)
+				except StopIteration:
+					# No more samples!
+					break
+			qBatch = wBatch
 
-				# Remember, neurons correspond to columns in the weight matrix.
-				# Only take the output of the neuron_idx neuron.
-				wX[:, neuron_idx] = prev_trained_output([wBatch])[0][:, neuron_idx]
-				qX[:, neuron_idx] = prev_quant_output([qBatch])[0][:, neuron_idx]
+			wX = prev_trained_output([wBatch])[0]
+			qX = prev_quant_output([qBatch])[0]
 
 		# If you're debugging, log wX and qX.
 		if self.is_debug:
