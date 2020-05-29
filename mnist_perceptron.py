@@ -64,8 +64,15 @@ model.add(Dense(num_classes, activation='softmax'))
 model.compile(optimizer="sgd", loss='categorical_crossentropy', metrics=['accuracy'])
 history = model.fit(X_net_train, y_net_train, batch_size=128, epochs=100, verbose=True, validation_split=.20)
 
-# TODO: Add residual plots
-fig, axes = plt.subplots(2, 2, figsize=(20,13))
+
+# Now quantize the network.
+get_data = (sample for sample in X_quant_train)
+# Make it so all data are used.
+batch_size = int(np.floor(quant_train_size/(len(hidden_layer_sizes)+1)))
+my_quant_net = QuantizedNeuralNetwork(network=model, batch_size=batch_size, get_data=get_data, logger=logger)
+my_quant_net.quantize_network()
+
+fig, axes = plt.subplots(2, 3, figsize=(25,13))
 
 axes[0,0].plot(history.history['accuracy'], '-o')
 axes[0,0].plot(history.history['val_accuracy'], '-o')
@@ -74,27 +81,37 @@ axes[0,0].set_ylabel('Accuracy', fontsize=16)
 axes[0,0].set_xlabel('Epoch',fontsize=16)
 axes[0,0].legend(['training', 'validation'], loc='best')
 
+# Plot first 3 residuals for first layer
+U0 = my_quant_net.residuals[0][0:3]
+layer0_norms = la.norm(U0, 2, axis=2)
+axes[0,1].plot(layer0_norms.T)
+axes[0,1].set_title("Residual Plots for Layer 0", fontsize=18)
+axes[0,1].set_xlabel(r"$t$", fontsize=16)
+axes[0,1].set_ylabel(r"$||u_t||$", fontsize=16)
+axes[0,1].legend(["Neuron 0", "Neuron 1", "Neuron 2"])
+
+# Plot first 3 residuals for last layer
+U_last = my_quant_net.residuals[len(model.layers)-1][0:3]
+last_layer_norms = la.norm(U_last, 2, axis=2)
+axes[0,2].plot(last_layer_norms.T)
+axes[0,2].set_title("Residual Plots for Final Layer", fontsize=18)
+axes[0,2].set_xlabel(r"$t$", fontsize=16)
+axes[0,2].set_ylabel(r"$||u_t||$", fontsize=16)
+axes[0,2].legend(["Neuron 0", "Neuron 1", "Neuron 2"])
+
 # Histogram the layers weights.
 W0 = model.layers[0].get_weights()[0].flatten()
-axes[0,1].hist(W0, bins=100)
-axes[0,1].set_title("Histogram of First Layer Weights", fontsize=18)
+axes[1,0].hist(W0, bins=100)
+axes[1,0].set_title("Histogram of First Layer Weights", fontsize=18)
 
 W1 = model.layers[1].get_weights()[0].flatten()
-axes[1,0].hist(W1, bins=100)
-axes[1,0].set_title("Histogram of Second Layer Weights", fontsize=18)
+axes[1,1].hist(W1, bins=100)
+axes[1,1].set_title("Histogram of Second Layer Weights", fontsize=18)
 
 
 W2 = model.layers[2].get_weights()[0].flatten()
-axes[1,1].hist(W2, bins=25)
-axes[1,1].set_title("Histogram of Third Layer Weights", fontsize=18)
-
-
-# Now quantize the network.
-get_data = (sample for sample in X_quant_train)
-# Make it so all data are used.
-batch_size = int(np.floor(quant_train_size/(len(hidden_layer_sizes)+1)))
-my_quant_net = QuantizedNeuralNetwork(network=model, batch_size=batch_size, get_data=get_data, logger=logger)
-my_quant_net.quantize_network()
+axes[1,2].hist(W2, bins=25)
+axes[1,2].set_title("Histogram of Third Layer Weights", fontsize=18)
 
 my_quant_net.quantized_net.compile(optimizer="sgd", loss='categorical_crossentropy', metrics=['accuracy'])
 analog_loss, analog_accuracy  = model.evaluate(X_test, y_test, verbose=True)

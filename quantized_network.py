@@ -179,7 +179,7 @@ class QuantizedNeuralNetwork():
 			self.layerwise_directions[layer_idx]['wX'] = wX
 			self.layerwise_directions[layer_idx]['qX'] = qX
 
-		# Now quantize the neurons. This is parallelizable if you wish to make it so.
+		# Now quantize the neurons.
 		with ThreadPoolExecutor() as executor:
 			future_to_neuron = {executor.submit(self.quantize_neuron, layer_idx, neuron_idx, wX, qX): neuron_idx for neuron_idx in range(N_ell_plus_1)}
 			for future in as_completed(future_to_neuron):
