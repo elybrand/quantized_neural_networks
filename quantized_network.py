@@ -1,15 +1,16 @@
 from numpy import array, zeros, dot, split, cumsum
 from numpy.random import permutation, randn
 from scipy.linalg import norm
-from keras.backend import function as Kfunction
-from keras.models import Sequential, Model, clone_model
-from keras.layers import Dense
+from tensorflow.keras.backend import function as Kfunction
+from tensorflow.keras.models import Sequential, Model, clone_model
+from tensorflow.keras.layers import Dense
 from tensorflow.image import extract_patches
 from tensorflow import reshape
 from typing import Optional, Callable, List, Generator
 from collections import namedtuple
 from matplotlib.pyplot import subplots
 from matplotlib.axes import Axes
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 QuantizedNeuron = namedtuple("QuantizedNeuron", ['layer_idx', 'neuron_idx', 'q', 'U'])
 QuantizedFilter = namedtuple("QuantizedFilter", ['layer_idx', 'filter_idx', 'channel_idx', 'q_filtr', 'U'])
@@ -179,15 +180,22 @@ class QuantizedNeuralNetwork():
 			self.layerwise_directions[layer_idx]['qX'] = qX
 
 		# Now quantize the neurons. This is parallelizable if you wish to make it so.
-		for neuron_idx in range(N_ell_plus_1):
-
-			qNeuron = self.quantize_neuron(layer_idx, neuron_idx, wX, qX)
-			if self.logger:
-				self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
-
-			# Update quantized weight matrix and the residual dictionary.
-			Q[:, neuron_idx] = qNeuron.q
-			self.residuals[layer_idx][neuron_idx,:] = qNeuron.U
+		with ThreadPoolExecutor() as executor:
+			future_to_neuron = {executor.submit(self.quantize_neuron, layer_idx, neuron_idx, wX, qX): neuron_idx for neuron_idx in range(N_ell_plus_1)}
+			for future in as_completed(future_to_neuron):
+				neuron_idx = future_to_neuron[future]
+				try:
+					qNeuron = future.result()
+				except Exception as exc:
+					if self.logger:
+						self.logger.error(f"Error quantizing neuron {neuron_idx} in layer {layer_idx}: {exc}")
+					else:
+						print(f"Error quantizing neuron {neuron_idx} in layer {layer_idx}: {exc}")
+				# Update quantized weight matrix and the residual dictionary.
+				Q[:, neuron_idx] = qNeuron.q
+				self.residuals[layer_idx][neuron_idx,:] = qNeuron.U
+				if self.logger:
+					self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
 
 		# Update the quantized network. Use the same bias vector as in the analog network for now.
 		bias = self.trained_net.layers[layer_idx].get_weights()[1]

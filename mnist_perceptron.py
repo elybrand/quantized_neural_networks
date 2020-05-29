@@ -3,10 +3,10 @@ from math import sqrt, log
 import scipy.linalg as la
 import matplotlib.pyplot as plt
 import logging
-from keras.layers import Dense
-from keras.models import Sequential
-from keras.datasets import mnist
-from keras.utils import to_categorical
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.datasets import mnist
+from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedNeuralNetwork
 from sys import stdout
 %matplotlib osx
@@ -50,7 +50,7 @@ X_quant_train = X_train[quant_train_idxs]
 y_quant_train = y_train[quant_train_idxs]
 
 # Build perceptron. We will vectorize the images.
-hidden_layer_sizes = [200, 100]
+hidden_layer_sizes = [32, 25]
 activation = 'sigmoid'
 model = Sequential()
 model.add(Dense(hidden_layer_sizes[0], activation='sigmoid', use_bias=True, input_dim=img_size))
@@ -64,6 +64,7 @@ model.add(Dense(num_classes, activation='softmax'))
 model.compile(optimizer="sgd", loss='categorical_crossentropy', metrics=['accuracy'])
 history = model.fit(X_net_train, y_net_train, batch_size=128, epochs=100, verbose=True, validation_split=.20)
 
+# TODO: Add residual plots
 fig, axes = plt.subplots(2, 2, figsize=(20,13))
 
 axes[0,0].plot(history.history['accuracy'], '-o')
