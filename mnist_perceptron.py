@@ -21,7 +21,7 @@ train, test = mnist.load_data(path="mnist.npz")
 # Split the training data into two populations. One for training the network and
 # one for training the quantization. For now, split it evenly.
 train_size = train[0].shape[0]
-net_train_size = int(0.5*train_size)
+net_train_size = int(0.3*train_size)
 quant_train_size = train_size - net_train_size
 net_train_idxs = np.random.choice(train_size, size=net_train_size, replace=False)
 quant_train_idxs = list(
@@ -63,7 +63,6 @@ model.add(Dense(num_classes, activation='softmax'))
 
 model.compile(optimizer="sgd", loss='categorical_crossentropy', metrics=['accuracy'])
 history = model.fit(X_net_train, y_net_train, batch_size=128, epochs=100, verbose=True, validation_split=.20)
-loss, accuracy  = model.evaluate(X_test, y_test, verbose=True)
 
 fig, axes = plt.subplots(2, 2, figsize=(20,13))
 
@@ -89,7 +88,16 @@ axes[1,1].hist(W2, bins=25)
 axes[1,1].set_title("Histogram of Third Layer Weights", fontsize=18)
 
 
-# Now quantize the network
+# Now quantize the network.
+get_data = (sample for sample in X_quant_train)
+# Make it so all data are used.
+batch_size = int(np.floor(quant_train_size/(len(hidden_layer_sizes)+1)))
+my_quant_net = QuantizedNeuralNetwork(network=model, batch_size=batch_size, get_data=get_data, logger=logger)
+my_quant_net.quantize_network()
 
-print(f'Analog Test loss: {loss:.3}')
-print(f'Analog Test accuracy: {accuracy:.3}')
+my_quant_net.quantized_net.compile(optimizer="sgd", loss='categorical_crossentropy', metrics=['accuracy'])
+analog_loss, analog_accuracy  = model.evaluate(X_test, y_test, verbose=True)
+q_loss, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose=True)
+
+print(f'Analog Test Loss: {analog_loss:.3}\t\tQuantized Test Loss:{q_loss:.3}')
+print(f'Analog Test Accuracy: {analog_accuracy:.3}\tQuantized Test Accuracy: {q_accuracy:.3}')

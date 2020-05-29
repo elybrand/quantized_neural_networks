@@ -17,12 +17,14 @@ SegmentedData = namedtuple("SegmentedData", ['wX_seg', 'qX_seg'])
 
 class QuantizedNeuralNetwork():
 
-	def __init__(self, network: Model, batch_size: int, get_batch_data: Generator[array, None, None], is_debug=False):
+	def __init__(self, network: Model, batch_size: int, get_data: Generator[array, None, None], logger=None, is_debug=False):
 		"""
 		CAVEAT: Bias terms are not quantized!
 		REMEMBER: TensorFlow flips everything for you. Networks act via
 
-		#TODO: change get_batch_data to generator
+		# TODO: add verbose flag
+		# TODO: add functionality to scale weights into [-1, 1].
+
 
 		batch_size x N_ell 	   N_ell x N_{ell+1} 
 
@@ -44,7 +46,7 @@ class QuantizedNeuralNetwork():
 		[ -- u_N_ell^T -- ]
 		"""
 
-		self.get_batch_data = get_batch_data
+		self.get_data = get_data
 		
 		# The pre-trained network.
 		self.trained_net = network
@@ -79,6 +81,9 @@ class QuantizedNeuralNetwork():
 								) 
 					for layer_idx, dims in self.layer_dims.items()
 				}
+
+		self.logger = logger
+
 		self.is_debug = is_debug
 
 		# This is used to log the directions which are used to choose the bits.
@@ -129,7 +134,7 @@ class QuantizedNeuralNetwork():
 		return qNeuron
 
 	def quantize_layer(self, layer_idx: int):
-		
+
 		N_ell, N_ell_plus_1 = self.trained_net.layers[layer_idx].get_weights()[0].shape
 		wX = zeros((self.batch_size, N_ell))
 		qX = zeros((self.batch_size, N_ell))
@@ -140,7 +145,7 @@ class QuantizedNeuralNetwork():
 			wX = zeros((self.batch_size, N_ell))
 			for sample_idx in range(self.batch_size):
 				try:
-					wX[sample_idx,:] = next(self.get_batch_data)
+					wX[sample_idx,:] = next(self.get_data)
 				except StopIteration:
 					# No more samples!
 					break
@@ -159,7 +164,7 @@ class QuantizedNeuralNetwork():
 			wBatch = zeros((self.batch_size, input_size))
 			for sample_idx in range(self.batch_size):
 				try:
-					wBatch[sample_idx,:] =next(self.get_batch_data)
+					wBatch[sample_idx,:] =next(self.get_data)
 				except StopIteration:
 					# No more samples!
 					break
@@ -177,6 +182,8 @@ class QuantizedNeuralNetwork():
 		for neuron_idx in range(N_ell_plus_1):
 
 			qNeuron = self.quantize_neuron(layer_idx, neuron_idx, wX, qX)
+			if self.logger:
+				self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
 
 			# Update quantized weight matrix and the residual dictionary.
 			Q[:, neuron_idx] = qNeuron.q
@@ -202,6 +209,8 @@ class QuantizedNeuralNetwork():
 		# This must be done sequentially.
 		for layer_idx, layer in enumerate(self.trained_net.layers):
 			# Only quantize dense layers.
+			if self.logger:
+				self.logger.info(f"Quantizing layer {layer_idx}...")
 			if layer.__class__.__name__ == 'Dense':
 				self.quantize_layer(layer_idx)
 
@@ -235,8 +244,8 @@ class QuantizedNeuralNetwork():
 
 	def layer_dashboard(self, layer_idx: int) -> Axes:
 
-		W = self.trained_net.get_weights()[layer_idx]
-		Q = self.quantized_net.get_weights()[layer_idx]
+		W = self.trained_net.layers[layer_idx].get_weights()[0]
+		Q = self.quantized_net.layers[layer_idx].get_weights()[0]
 		U_tensor = self.residuals[layer_idx]
 		N_ell, N_ell_plus_1 = W.shape
 
