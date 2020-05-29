@@ -69,7 +69,8 @@ history = model.fit(X_net_train, y_net_train, batch_size=128, epochs=100, verbos
 get_data = (sample for sample in X_quant_train)
 # Make it so all data are used.
 batch_size = int(np.floor(quant_train_size/(len(hidden_layer_sizes)+1)))
-my_quant_net = QuantizedNeuralNetwork(network=model, batch_size=batch_size, get_data=get_data, logger=logger)
+ignore_layers = [len(model.layers)-1]
+my_quant_net = QuantizedNeuralNetwork(network=model, batch_size=batch_size, get_data=get_data, logger=logger, ignore_layers=ignore_layers)
 my_quant_net.quantize_network()
 
 fig, axes = plt.subplots(2, 3, figsize=(25,13))

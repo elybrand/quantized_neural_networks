@@ -18,7 +18,7 @@ SegmentedData = namedtuple("SegmentedData", ['wX_seg', 'qX_seg'])
 
 class QuantizedNeuralNetwork():
 
-	def __init__(self, network: Model, batch_size: int, get_data: Generator[array, None, None], logger=None, is_debug=False):
+	def __init__(self, network: Model, batch_size: int, get_data: Generator[array, None, None], logger=None, is_debug=False, ignore_layers=[]):
 		"""
 		CAVEAT: Bias terms are not quantized!
 		REMEMBER: TensorFlow flips everything for you. Networks act via
@@ -84,6 +84,8 @@ class QuantizedNeuralNetwork():
 				}
 
 		self.logger = logger
+
+		self.ignore_layers = ignore_layers
 
 		self.is_debug = is_debug
 
@@ -216,11 +218,14 @@ class QuantizedNeuralNetwork():
 		
 		# This must be done sequentially.
 		for layer_idx, layer in enumerate(self.trained_net.layers):
-			# Only quantize dense layers.
-			if self.logger:
-				self.logger.info(f"Quantizing layer {layer_idx}...")
-			if layer.__class__.__name__ == 'Dense':
+			if layer.__class__.__name__ == 'Dense' and layer_idx not in self.ignore_layers:
+				# Only quantize dense layers.
+				if self.logger:
+					self.logger.info(f"Quantizing layer {layer_idx}...")
 				self.quantize_layer(layer_idx)
+			# If a dense layer is to be ignored, then copy the weights from the analog network
+			elif layer.__class__.__name__ == 'Dense' and layer_idx in self.ignore_layers:
+				self.quantized_net.layers[layer_idx].set_weights(self.trained_net.layers[layer_idx].get_weights())
 
 	def neuron_dashboard(self, layer_idx: int, neuron_idx: int) -> Axes:
 
