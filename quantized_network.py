@@ -1,4 +1,4 @@
-from numpy import array, zeros, dot, split, cumsum
+from numpy import array, zeros, dot, split, cumsum, median, nan
 from numpy.random import permutation, randn
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
@@ -55,6 +55,9 @@ class QuantizedNeuralNetwork():
 		# This copies the network structure but not the weights.
 		self.quantized_net = clone_model(network) 
 
+		# Set all the weights to be the same a priori.
+		self.quantized_net.set_weights(network.get_weights())
+
 		self.batch_size = batch_size
 
 		# Create a dictionary encoding which layers are Dense, and what their dimensions are.
@@ -105,19 +108,19 @@ class QuantizedNeuralNetwork():
 			}
 
 
-	def bit_round(self, t: float) -> int:
-		if abs(t) < 1/2:
+	def bit_round(self, t: float, rad: float) -> int:
+		if abs(t) < (1.0 * rad)/2:
 			return 0
-		return -1 if t <= -1/2 else 1
+		return -rad if t <= (-1.0 * rad)/2 else rad
 
-	def quantize_weight(self, w: float, u: array, X: array, X_tilde: array) -> int:
+	def quantize_weight(self, w: float, u: array, X: array, X_tilde: array, rad: float) -> int:
 		# This is undefined if X_tilde is zero. In this case, return 0.
 		if norm(X_tilde,2) < 10**(-16):
 			return 0
 
-		return self.bit_round(dot(X_tilde, u + w*X)/(norm(X_tilde,2)**2))
+		return self.bit_round(dot(X_tilde, u + w*X)/(norm(X_tilde,2)**2), rad)
 
-	def quantize_neuron(self, layer_idx: int, neuron_idx: int, wX: array, qX: array) -> QuantizedNeuron:
+	def quantize_neuron(self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1) -> QuantizedNeuron:
 
 		N_ell = wX.shape[1]
 		u_init = zeros(self.batch_size)
@@ -125,11 +128,11 @@ class QuantizedNeuralNetwork():
 		q = zeros(N_ell)
 		U = zeros((N_ell, self.batch_size))
 		# Take columns of the data matrix, since the samples are given via the rows.
-		q[0] = self.quantize_weight(w[0], u_init, wX[:,0], qX[:,0])
+		q[0] = self.quantize_weight(w[0], u_init, wX[:,0], qX[:,0], rad)
 		U[0,:] = u_init + w[0]*wX[:,0] - q[0]*qX[:,0]
 
 		for t in range(1,N_ell):
-			q[t] = self.quantize_weight(w[t], U[t-1,:], wX[:,t], qX[:,t])
+			q[t] = self.quantize_weight(w[t], U[t-1,:], wX[:,t], qX[:,t], rad)
 			U[t,:] = U[t-1,:] + w[t]*wX[:,t] - q[t]*qX[:,t]
 
 		qNeuron = QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
@@ -138,7 +141,8 @@ class QuantizedNeuralNetwork():
 
 	def quantize_layer(self, layer_idx: int):
 
-		N_ell, N_ell_plus_1 = self.trained_net.layers[layer_idx].get_weights()[0].shape
+		W = self.trained_net.layers[layer_idx].get_weights()[0]
+		N_ell, N_ell_plus_1 = W.shape
 		wX = zeros((self.batch_size, N_ell))
 		qX = zeros((self.batch_size, N_ell))
 		# Placeholder for the weight matrix in the quantized network.
@@ -173,6 +177,7 @@ class QuantizedNeuralNetwork():
 					break
 			qBatch = wBatch
 
+			# breakpoint()
 			wX = prev_trained_output([wBatch])[0]
 			qX = prev_quant_output([qBatch])[0]
 
@@ -181,9 +186,14 @@ class QuantizedNeuralNetwork():
 			self.layerwise_directions[layer_idx]['wX'] = wX
 			self.layerwise_directions[layer_idx]['qX'] = qX
 
+		# Set the radius of the ternary alphabet.
+		alpha = 1 # This is somewhat arbitrary.
+		rad = alpha * median(abs(W.flatten()))
+		# rad = max(abs(W.flatten()))
+
 		# Now quantize the neurons.
 		with ThreadPoolExecutor() as executor:
-			future_to_neuron = {executor.submit(self.quantize_neuron, layer_idx, neuron_idx, wX, qX): neuron_idx for neuron_idx in range(N_ell_plus_1)}
+			future_to_neuron = {executor.submit(self.quantize_neuron, layer_idx, neuron_idx, wX, qX, rad): neuron_idx for neuron_idx in range(N_ell_plus_1)}
 			for future in as_completed(future_to_neuron):
 				neuron_idx = future_to_neuron[future]
 				try:
@@ -212,7 +222,7 @@ class QuantizedNeuralNetwork():
 								)
 		new_wX = this_layer_trained_output([wX])[0]
 		new_qX = this_layer_quant_output([qX])[0]
-		self.layerwise_rel_errs[layer_idx] = [norm(new_wX[:, t] - new_qX[:, t])/norm(new_wX[:,t]) for t in range(N_ell_plus_1)]
+		self.layerwise_rel_errs[layer_idx] = [norm(new_wX[:, t] - new_qX[:, t])/norm(new_wX[:,t]) if norm(new_wX[:,t]) > 10**-8 else nan for t in range(N_ell_plus_1)]
 
 	def quantize_network(self):
 		
@@ -223,9 +233,6 @@ class QuantizedNeuralNetwork():
 				if self.logger:
 					self.logger.info(f"Quantizing layer {layer_idx}...")
 				self.quantize_layer(layer_idx)
-			# If a dense layer is to be ignored, then copy the weights from the analog network
-			elif layer.__class__.__name__ == 'Dense' and layer_idx in self.ignore_layers:
-				self.quantized_net.layers[layer_idx].set_weights(self.trained_net.layers[layer_idx].get_weights())
 
 	def neuron_dashboard(self, layer_idx: int, neuron_idx: int) -> Axes:
 
