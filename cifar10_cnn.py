@@ -25,7 +25,7 @@ train, test =cifar10.load_data()
 # Split the training data into two populations. One for training the network and
 # one for training the quantization. For now, split it evenly.
 train_size = train[0].shape[0]
-quant_train_size = 10
+quant_train_size = 10**4
 net_train_size = train_size - quant_train_size
 net_train_idxs = np.random.choice(train_size, size=net_train_size, replace=False)
 quant_train_idxs = list(
