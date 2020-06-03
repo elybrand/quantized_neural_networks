@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.DEBUG)
 
 # Split training from testing
-train, test =cifar10.load_data()
+train, test =mnist.load_data()
 
 # Split the training data into two populations. One for training the network and
 # one for training the quantization. For now, split it evenly.
@@ -37,11 +37,11 @@ quant_train_idxs = list(
 X_train, y_train = train
 X_test, y_test = test
 
-# #MNIST only
-# train_shape = X_train.shape
-# test_shape = X_test.shape
-# X_train = X_train.reshape(train_shape[0], train_shape[1], train_shape[2],1)
-# X_test = X_test.reshape(test_shape[0], test_shape[1], test_shape[2],1)
+#MNIST only
+train_shape = X_train.shape
+test_shape = X_test.shape
+X_train = X_train.reshape(train_shape[0], train_shape[1], train_shape[2],1)
+X_test = X_test.reshape(test_shape[0], test_shape[1], test_shape[2],1)
 
 num_classes = np.unique(y_train).shape[0]
 y_train = to_categorical(y_train, num_classes)
@@ -57,14 +57,16 @@ y_quant_train = y_train[quant_train_idxs]
 
 # Construct a basic convolutional neural network.
 model = Sequential()
-model.add(Conv2D(filters=64, kernel_size=3, strides=(2,2), activation='relu', input_shape=input_shape))
-model.add(Conv2D(filters=32, kernel_size=3,  strides=(2,2), activation='relu'))
+model.add(Conv2D(filters=64, kernel_size=7, strides=(2,2), activation='relu', input_shape=input_shape))
+model.add(BatchNormalization())
+model.add(Conv2D(filters=32, kernel_size=7,  strides=(2,2), activation='relu'))
+model.add(BatchNormalization())
 model.add(Flatten())
 model.add(Dense(10, activation='softmax'))
 
 # Not too many epochs...training CNN's appears to be quite slow.
 model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-history = model.fit(X_net_train, y_net_train, batch_size=128, epochs=1, verbose=True, validation_split=.20)
+history = model.fit(X_net_train, y_net_train, batch_size=128, epochs=20, verbose=True, validation_split=.20)
 
 # Quantize the network.
 get_data = (sample for sample in X_quant_train)
@@ -99,4 +101,4 @@ MSQ_loss, MSQ_accuracy = MSQ_model.evaluate(X_test, y_test, verbose=True)
 
 
 print(f'Analog Test Loss: {analog_loss:.3}\t\t\tMSQ Test Loss: {MSQ_loss:.3}\t\t\tQuantized Test Loss: {q_loss:.3}')
-print(f'Analog Test Accuracy: {analog_accuracy:.3}\t\t\tMSQ Test Accuracy: {MSQ_accuracy:.3}\t\t\tQuantized Test Accuracy: {q_accuracy:.3}')
+print(f'Analog Test Accuracy: {analog_accuracy:.3}\t\tMSQ Test Accuracy: {MSQ_accuracy:.3}\t\tQuantized Test Accuracy: {q_accuracy:.3}')
