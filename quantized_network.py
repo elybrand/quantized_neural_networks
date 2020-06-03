@@ -1,11 +1,11 @@
-from numpy import array, zeros, dot, split, cumsum, median, nan
+from numpy import array, zeros, dot, split, cumsum, median, nan, reshape
 from numpy.random import permutation, randn
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
 from tensorflow.keras.models import Sequential, Model, clone_model
 from tensorflow.keras.layers import Dense
 from tensorflow.image import extract_patches
-from tensorflow import reshape
+# from tensorflow import reshape
 from typing import Optional, Callable, List, Generator
 from collections import namedtuple
 from matplotlib.pyplot import subplots
@@ -167,11 +167,11 @@ class QuantizedNeuralNetwork():
 									[self.quantized_net.layers[layer_idx-1].output]
 									)
 
-			input_size = self.layer_dims[0][0]
+			input_size = self.trained_net.layers[0].get_weights()[0].shape[0]
 			wBatch = zeros((self.batch_size, input_size))
 			for sample_idx in range(self.batch_size):
 				try:
-					wBatch[sample_idx,:] =next(self.get_data)
+					wBatch[sample_idx,:] = next(self.get_data)
 				except StopIteration:
 					# No more samples!
 					break
@@ -189,7 +189,6 @@ class QuantizedNeuralNetwork():
 		# Set the radius of the ternary alphabet.
 		alpha = 1 # This is somewhat arbitrary.
 		rad = alpha * median(abs(W.flatten()))
-		# rad = max(abs(W.flatten()))
 
 		# Now quantize the neurons.
 		with ThreadPoolExecutor() as executor:
@@ -299,59 +298,26 @@ class QuantizedNeuralNetwork():
 
 class QuantizedCNN(QuantizedNeuralNetwork):
 
-	def __init__(self, network: Model, batch_size: int, get_batch_data: Callable[[int], array], is_debug=False):
-		self.get_batch_data = get_batch_data
+	#TODO: Add logging option
+	#TODO: Add ignore_layer option
+
+	def __init__(self, network: Model, batch_size: int, get_data: Generator[array, None, None], logger=None, is_debug=False):
+		self.get_data = get_data
 		
 		# The pre-trained network.
 		self.trained_net = network
 
 		# This copies the network structure but not the weights.
 		self.quantized_net = clone_model(network) 
+		self.quantized_net.set_weights(network.get_weights())
 
 		# This quantifies how many images are used in a given batch to train a layer. This is subtly different
 		# than the batch_size for the perceptron case because the actual data here are *patches* of images.
 		self.batch_size = batch_size
 
-		# A dictionary with key being the layer index ell and the values being tensors.
-		# self.residuals[ell][neuron_idx, :] is a N_ell x batch_size matrix storing the residuals
-		# generated while quantizing the neuron_idx neuron.
+		self.logger = logger
 
-		#TODO: this is a pain in the ass, but the batch size in the below dictionary actually needs to be
-		# the number of patches, not the number of images.
-		self.residuals = {	        
-							layer_idx: zeros((
-										weight_matrix.shape[1], # N_{ell+1} neurons,
-										weight_matrix.shape[0], # N_{ell} dimensional feature
-										self.batch_size)) 		# Dimension of the residual vectors.
-							for layer_idx, weight_matrix in enumerate(network.get_weights())
-						}
-
-		# Logs the relative error between the data fed through the unquantized network and the
-		# quantized network.
-		self.layerwise_rel_errs = {	        
-					layer_idx: zeros(
-								weight_matrix.shape[0], # N_{ell} dimensional feature,
-								) 
-					for layer_idx, weight_matrix in enumerate(network.get_weights())
-				}
-		self.is_debug = is_debug
-
-		# This is used to log the directions which are used to choose the bits.
-		if self.is_debug:
-			self.layerwise_directions = {
-				layer_idx: { 'wX': zeros(				
-							(self.batch_size, # B vectors in each batch
-							weight_matrix.shape[0]) # N_ell dimensional feature
-							),
-							'qX':zeros(				
-							(self.batch_size, # B vectors in each batch
-							weight_matrix.shape[0]) # N_ell dimensional feature
-							),
-							}
-				for layer_idx, weight_matrix in enumerate(network.get_weights())
-			}
-
-	def segment_data2D(kernel_size: tuple, strides: tuple, padding, wX: array, qX: array) -> SegmentedData:
+	def segment_data2D(self, kernel_size: tuple, strides: tuple, padding, wX: array, qX: array) -> SegmentedData:
 		# We need to format these variables so that tensorflow can interpret them
 		# for a list of images.
 		kernel_sizes_list = [1, kernel_size[0], kernel_size[1], 1]
@@ -363,6 +329,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 		# wX_seg[i,, x, y] is the *flattened* patch for batch i at the xth row stride and the yth column stride.
 		# Since we're just dealing with one batch each, and we don't particularly care about the ordering
 		# of the patches, we'll just flatten it all into a 2D tensor.
+
 		wX_seg = extract_patches(images=wX,
 								sizes=kernel_sizes_list,
 								strides=strides_list,
@@ -374,62 +341,82 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 								rates=rates,
 								padding=padding)
 
-		new_shape = (wX_seg.shape[1]*wX_seg.shape[2], wX_seg.shape[3])
-		wX_seg = reshape(wX_seg, new_shape).numpy()
-		qX_seg = reshape(qX_seg, new_shape).numpy()
+		# Now at this point, we don't really care about how the patches are grouped. So we reshape them into a 2 tensor, where the patches
+		# are vectorized and stored in the rows.
+		new_shape = (wX_seg.shape[0]*wX_seg.shape[1]*wX_seg.shape[2], wX_seg.shape[3])
+		wX_seg = reshape(wX_seg, new_shape)
+		qX_seg = reshape(qX_seg, new_shape)
 
 		return SegmentedData(wX_seg=wX_seg, qX_seg=qX_seg)
 
-	def quantize_filter2D(self, layer_idx: int, filter_idx: int, wX: array, qX: array) -> List[QuantizedFilter]:
+	def quantize_filter2D(self, layer_idx: int, filter_idx: int, wX: array, qX: array, rad: float) -> List[QuantizedFilter]:
 
 		# Each channel has its own filter, so we need to split by channel. We assume the number of channels 
-		# is the last dimension in the tensor.
+		# is the last dimension in the tensor, since this is how Tensorflow formats it (as compared to Theano, which is first).
 		num_channels = wX.shape[-1]
-		layer = model.layers[layer_idx]
+		layer = self.trained_net.layers[layer_idx]
 		kernel_size = layer.kernel_size
 		strides = layer.strides
-		padding = layer.padding
-		quantized_filter_list = []
+		padding = layer.padding.upper() # Have to capitalize this apparently...why keras and TF don't coordinate this is beyond me.
+		quantized_chan_filter_list = []
 		for channel_idx in range(num_channels):
 
-			# Segment the data into patches.
+			# Segment the channel data into patches.
 			channel_wX = wX[:,:,:,channel_idx]
 			channel_qX = qX[:,:,:,channel_idx]
 
-			seg_data = segment_data2D(kernel_size, strides, padding, channel_wX, channel_qX)
+			# We have to reshape into a 4 tensor because Tensorflow is picky.
+			channel_wX = reshape(channel_wX, (*channel_wX.shape, 1))
+			channel_qX = reshape(channel_qX, (*channel_qX.shape, 1))
+
+			# This will return a tensor where the patches have been flattened as rows.
+			seg_data = self.segment_data2D(kernel_size, strides, padding, channel_wX, channel_qX)
 			channel_wX_patches = seg_data.wX_seg
 			channel_qX_patches = seg_data.qX_seg
 
-			filtr = layer.get_weights()[0][:,:,:,filter_idx][:,:,channel_idx]
+			chan_filtr = layer.get_weights()[0][:,:,:,filter_idx][:,:,channel_idx]
 			# Flatten the filter.
-			filtr = reshape(filtr, filtr.size)
+			chan_filtr = reshape(chan_filtr, chan_filtr.size)
 			# Now quantize the filter as if it were a neuron in a perceptron, i.e. a column vector.
 			# Here, B represents the patch batch (!) size.
 			B = seg_data.wX_seg.shape[0]
 			u_init = zeros(B)
-			q_filtr = zeros(filtr.size)
-			U = zeros((filtr.size, B))
-			q_filtr[0] = super().quantize_weight(filtr[0], u_init, channel_wX_patches[:,0], channel_qX_patches[:,0])
-			U[0,:] = u_init + filtr[0]*channel_wX_patches[:,0] - q_filtr[0]*channel_qX_patches[:,0]
+			q_filtr = zeros(chan_filtr.size)
+			U = zeros((chan_filtr.size, B))
+			q_filtr[0] = super().quantize_weight(chan_filtr[0], u_init, channel_wX_patches[:,0], channel_qX_patches[:,0], rad)
+			U[0,:] = u_init + chan_filtr[0]*channel_wX_patches[:,0] - q_filtr[0]*channel_qX_patches[:,0]
 
-			for t in range(1,filtr.size):
-				q_filtr[t] = super().quantize_weight(filtr[t], U[t-1,:], channel_wX_patches[:,t], channel_qX_patches[:,t])
-				U[t,:] = U[t-1,:] + w[t]*wX[:,t] - q[t]*qX[:,t]
+			for t in range(1,chan_filtr.size):
+				q_filtr[t] = super().quantize_weight(chan_filtr[t], U[t-1,:], channel_wX_patches[:,t], channel_qX_patches[:,t], rad)
+				U[t,:] = U[t-1,:] + chan_filtr[t]*channel_wX_patches[:,t] - q_filtr[t]*channel_qX_patches[:,t]
 
-			quantized_filter_list += [QuantizedFilter(layer_idx=layer_idx, filter_idx=filter_idx, channel_idx=channel_idx, q_filtr=q_filtr, U=U)]
+			q_filtr = reshape(q_filtr, kernel_size)
+			quantized_chan_filter_list += [QuantizedFilter(layer_idx=layer_idx, filter_idx=filter_idx, channel_idx=channel_idx, q_filtr=q_filtr, U=U)]
 
-		return quantized_filter_list
+		return quantized_chan_filter_list
 
-	def quantize_conv2D_layer(self, layer_idx: int):
-		# wX formatted as an array of images. No flattening.
-		num_filters = model.layers[layer_idx].filters
-		filter_shape = model.layers[layer_idx].kernel_size
+	def quantize_dense_layer(self, layer_idx: int):
+
+		input_shape = self.trained_net.layers[0].input_shape[1:]
+		W =  self.trained_net.layers[layer_idx].get_weights()[0]
+		Q = zeros(W.shape)
+		N_ell_plus_1 = W.shape[1]
+		num_channels = W.shape[-2] # The last index is the number of filters in this case.
+		batch = zeros((self.batch_size, *input_shape))
+		for sample_idx in range(self.batch_size):
+			try:
+				batch[sample_idx] = next(self.get_data)
+			except StopIteration:
+				# No more samples!
+				break
+
 		if layer_idx == 0:
-			wX = get_batch_data()
+			wX = batch
 			qX = wX
 		else:
 			# Define functions which will give you the output of the previous hidden layers
-			# for both networks.
+			# for both networks. This assumes that the only input this layer receives is from
+			# the immediately preceding layer, i.e. no skip layers.
 			prev_trained_output = Kfunction([self.trained_net.layers[0].input],
 										[self.trained_net.layers[layer_idx-1].output]
 									)
@@ -437,57 +424,108 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 									[self.quantized_net.layers[layer_idx-1].output]
 									)
 
-			batch = self.get_batch_data(self.batch_size)
 			wX = prev_trained_output([batch])[0]
 			qX = prev_quant_output([batch])[0]
 
-		# If you're debugging, log wX and qX.
-		if self.is_debug:
-			self.layerwise_directions[layer_idx]['wX'] = wX
-			self.layerwise_directions[layer_idx]['qX'] = qX
+		# Set the radius of the ternary alphabet.
+		alpha = 1 # This is somewhat arbitrary.
+		rad = alpha * median(abs(W.flatten()))
 
+		# Now quantize the neurons.
+		with ThreadPoolExecutor() as executor:
+			future_to_neuron = {executor.submit(self.quantize_neuron, layer_idx, neuron_idx, wX, qX, rad): neuron_idx for neuron_idx in range(N_ell_plus_1)}
+			for future in as_completed(future_to_neuron):
+				neuron_idx = future_to_neuron[future]
+				try:
+					qNeuron = future.result()
+				except Exception as exc:
+					if self.logger:
+						self.logger.error(f"Error quantizing neuron {neuron_idx} in layer {layer_idx}: {exc}")
+					else:
+						print(f"Error quantizing neuron {neuron_idx} in layer {layer_idx}: {exc}")
+				# Update quantized weight matrix.
+				Q[:, neuron_idx] = qNeuron.q
+				if self.logger:
+					self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
+
+		# Update the quantized network. Use the same bias vector as in the analog network for now.
+		bias = self.trained_net.layers[layer_idx].get_weights()[1]
+		self.quantized_net.layers[layer_idx].set_weights([Q, bias])
+
+	def quantize_conv2D_layer(self, layer_idx: int):
+		# wX formatted as an array of images. No flattening.
+		num_filters = self.trained_net.layers[layer_idx].filters
+		filter_shape = self.trained_net.layers[layer_idx].kernel_size
+		input_shape = self.trained_net.layers[0].input_shape[1:]
+		W =  self.trained_net.layers[layer_idx].get_weights()[0]
+		num_channels = W.shape[-2] # The last index is the number of filters in this case.
+		batch = zeros((self.batch_size, *input_shape))
+		for sample_idx in range(self.batch_size):
+			try:
+				batch[sample_idx] = next(self.get_data)
+			except StopIteration:
+				# No more samples!
+				break
+
+		if layer_idx == 0:
+			wX = batch
+			qX = wX
+		else:
+			# Define functions which will give you the output of the previous hidden layers
+			# for both networks. This assumes that the only input this layer receives is from
+			# the immediately preceding layer, i.e. no skip layers.
+			prev_trained_output = Kfunction([self.trained_net.layers[0].input],
+										[self.trained_net.layers[layer_idx-1].output]
+									)
+			prev_quant_output = Kfunction([self.quantized_net.layers[0].input],
+									[self.quantized_net.layers[layer_idx-1].output]
+									)
+
+			wX = prev_trained_output([batch])[0]
+			qX = prev_quant_output([batch])[0]
+
+		# Set the radius of the ternary alphabet.
+		alpha = 1 # This is somewhat arbitrary.
+		rad = alpha * median(abs(W.flatten()))
+
+		Q = zeros(W.shape)
+		# This should be multi-threaded.
 		for filter_idx in range(num_filters):
-			# This returns a list of quantized filters because for a given patch of an image,
+			# This returns a list of quantized channel filters because for a given patch of an image,
 			# each channel has its own convolutional filter. So for a standard RGB channel image,
 			# this list should have three elements.
-			quantized_filter_list = quantize_filter2D(layer_idx, filter_idx, wX, qX)
+			quantized_chan_filter_list = self.quantize_filter2D(layer_idx, filter_idx, wX, qX, rad)
 			# Now we need to stack all the channel information together again.
-			N, B = quantized_filter_list.U.shape
+			N, B = quantized_chan_filter_list[0].U.shape
 			filter_U = zeros((N, B, num_channels))
+			# Again, following Tensorflow convention that the channel information is the last component.
 			quantized_filter = zeros((filter_shape[0], filter_shape[1], num_channels))
-			for channel_filter in quantized_filter_list:
+			for channel_filter in quantized_chan_filter_list:
+				channel_idx = channel_filter.channel_idx
 				filter_U[:, :, channel_idx] = channel_filter.U
 				quantized_filter[:,:, channel_idx] = channel_filter.q_filtr
 
+			Q[:,:,:,filter_idx] = quantized_filter
 
+			if self.logger:
+				self.logger.info(f"\tFinished quantizing filter {filter_idx} of {num_filters}")
+
+		# Now update the layer in the quantized network. Leave the bias the same for now.
+		b = self.quantized_net.layers[layer_idx].get_weights()[1]
+		self.quantized_net.layers[layer_idx].set_weights([Q, b])
 
 
 	def quantize_network(self):
-		# TODO: you need to manually copy the bias terms and all other things that aren't the conv2D layers. Cloning
-		# the network only copies the structure.
-		pass
-
-
-
-
-if __name__ == "__main__":
-
-	N0 = 10
-	N1 = 32
-	N2 = 1
-	batch_size = 10
-
-	def get_batch_data(batch_size:int):
-		# Gaussian data for now.
-		return randn(batch_size, N0)
-
-	model = Sequential()
-	layer1 = Dense(N1, activation=None, use_bias=False, input_dim=N0)
-	layer2 = Dense(N2, activation=None, use_bias=False)
-	model.add(layer1)
-	model.add(layer2)
-
-	my_quant_net = QuantizedNeuralNetwork(model, batch_size, get_batch_data)
-	my_quant_net.quantize_network()
+		
+		for layer_idx, layer in enumerate(self.trained_net.layers):
+			if layer.__class__.__name__ == 'Dense':
+				# Use parent class quantize layer
+				if self.logger:
+					self.logger.info(f"Quanziting (dense) layer {layer_idx}...")
+				self.quantize_dense_layer(layer_idx)
+			if layer.__class__.__name__ == 'Conv2D':
+				if self.logger:
+					self.logger.info(f"Quanziting (Conv2D) layer {layer_idx}...")
+				self.quantize_conv2D_layer(layer_idx)
 
 
