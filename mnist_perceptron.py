@@ -6,7 +6,7 @@ import logging
 from tensorflow.keras.layers import Dense, BatchNormalization
 from tensorflow.keras.initializers import RandomNormal, GlorotUniform, GlorotNormal, RandomUniform
 from tensorflow.keras.models import Sequential, clone_model
-from tensorflow.keras.datasets import mnist, cifar10
+from tensorflow.keras.datasets import mnist
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.backend import function as Kfunction
 from tensorflow.keras.optimizers import SGD
