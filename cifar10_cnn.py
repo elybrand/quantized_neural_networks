@@ -37,10 +37,10 @@ np.random.seed(np_seed)
 
 # Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
 data_sets = ['mnist']
-trial_idxs = range(5)
+trial_idxs = [0]
 rectifiers = ['relu']
 kernel_inits = [GlorotUniform]
-kernel_sizes = [3]
+kernel_sizes = [3, 4]
 strides = [2]
 train_batch_sizes = [128]
 epochs = [1]
@@ -200,13 +200,20 @@ if __name__ == '__main__':
 	# Just use one worker until you can figure out if you can avoid RAM exploding for more than 1.
 	# TODO: This isn't failsafe. If one process happens to fail, nothing gets written to the file.
 	# Perhaps what you shoul do instead is append to csv file as you go?
-	with ProcessPoolExecutor(max_workers=1) as executor:
-		for trial_metrics in executor.map(train_network, param_iterable):
-			# Append to the global dictionary:
-			model_metrics = model_metrics.append(trial_metrics)
+	# with ProcessPoolExecutor(max_workers=1) as executor:
+	# 	for trial_metrics in executor.map(train_network, param_iterable):
+	# 		# Append to the global dictionary:
+	# 		model_metrics = model_metrics.append(trial_metrics)
 
-	# Write model metrics to file.
-	file_name = model_metrics['data_set'][0] + '_model_metrics_' + str(pd.Timestamp.now())
-	model_metrics.to_csv(f'./model_metrics/{file_name}.csv', mode='a')
+	# Store results in csv file.
+	file_name = data_sets[0] + '_model_metrics_' + str(pd.Timestamp.now())
+	for idx, params in enumerate(param_iterable):
+		trial_metrics = train_network(params)
+		if idx == 0:
+			# add the header
+			trial_metrics.to_csv(f'./model_metrics/{file_name}.csv', mode='a')
+		else:
+			trial_metrics.to_csv(f'./model_metrics/{file_name}.csv', mode='a', header=False)
+
 
 

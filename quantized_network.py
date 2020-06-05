@@ -424,6 +424,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 									[self.quantized_net.layers[layer_idx-1].output]
 									)
 
+			# I wonder if this is where you run into memory issues...forcing all the data through the network at once
+			# rather than doing it in batches.
 			wX = prev_trained_output([batch])[0]
 			qX = prev_quant_output([batch])[0]
 
@@ -526,7 +528,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 				# Now we need to stack all the channel information together again.
 				N, B = quantized_chan_filter_list[0].U.shape
 				filter_U = zeros((N, B, num_channels))
-				# Again, following Tensorflow convention that the channel information is the last component.
+				# Again, following Tensorflow convention that the channel information is the l ast component.
 				quantized_filter = zeros((filter_shape[0], filter_shape[1], num_channels))
 				for channel_filter in quantized_chan_filter_list:
 					channel_idx = channel_filter.channel_idx
