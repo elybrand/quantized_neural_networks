@@ -3,3 +3,4 @@
 "Icon\r"
 __pycache__/
 quant_net_exploratory.py
+train_logs

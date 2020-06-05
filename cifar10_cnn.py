@@ -197,9 +197,6 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
 
 if __name__ == '__main__':
 
-	# Just use one worker until you can figure out if you can avoid RAM exploding for more than 1.
-	# TODO: This isn't failsafe. If one process happens to fail, nothing gets written to the file.
-	# Perhaps what you shoul do instead is append to csv file as you go?
 	# with ProcessPoolExecutor(max_workers=1) as executor:
 	# 	for trial_metrics in executor.map(train_network, param_iterable):
 	# 		# Append to the global dictionary:
