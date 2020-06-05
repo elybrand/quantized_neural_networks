@@ -37,13 +37,13 @@ np.random.seed(np_seed)
 
 # Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
 data_sets = ['mnist']
-trial_idxs = [0]
+trial_idxs = range(5)
 rectifiers = ['relu']
 kernel_inits = [GlorotUniform]
-kernel_sizes = [3, 4]
+kernel_sizes = [3, 4, 5, 6, 7]
 strides = [2]
 train_batch_sizes = [128]
-epochs = [1]
+epochs = [20]
 q_train_sizes = [10**4]
 ignore_layers = [[]]
 
