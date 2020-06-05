@@ -549,11 +549,11 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 			if layer.__class__.__name__ == 'Dense':
 				# Use parent class quantize layer
 				if self.logger:
-					self.logger.info(f"Quanziting (dense) layer {layer_idx}...")
+					self.logger.info(f"Quantizing (dense) layer {layer_idx}...")
 				self.quantize_dense_layer(layer_idx)
 			if layer.__class__.__name__ == 'Conv2D':
 				if self.logger:
-					self.logger.info(f"Quanziting (Conv2D) layer {layer_idx}...")
+					self.logger.info(f"Quantizing (Conv2D) layer {layer_idx}...")
 				self.quantize_conv2D_layer(layer_idx)
 
 
