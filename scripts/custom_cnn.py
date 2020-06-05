@@ -36,11 +36,11 @@ set_seed(tf_seed)
 np.random.seed(np_seed)
 
 # Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
-data_sets = ['mnist']
-trial_idxs = range(5)
+data_sets = ['cifar10']
+trial_idxs = [0]
 rectifiers = ['relu']
 kernel_inits = [GlorotUniform]
-kernel_sizes = [3, 4, 5, 6, 7]
+kernel_sizes = [4]
 strides = [2]
 train_batch_sizes = [128]
 epochs = [20]

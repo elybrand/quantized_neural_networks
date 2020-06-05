@@ -491,26 +491,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 		rad = alpha * median(abs(W.flatten()))
 
 		Q = zeros(W.shape)
-		# # This should be multi-threaded.
-		# for filter_idx in range(num_filters):
-		# 	# This returns a list of quantized channel filters because for a given patch of an image,
-		# 	# each channel has its own convolutional filter. So for a standard RGB channel image,
-		# 	# this list should have three elements.
-		# 	quantized_chan_filter_list = self.quantize_filter2D(layer_idx, filter_idx, wX, qX, rad)
-		# 	# Now we need to stack all the channel information together again.
-		# 	N, B = quantized_chan_filter_list[0].U.shape
-		# 	filter_U = zeros((N, B, num_channels))
-		# 	# Again, following Tensorflow convention that the channel information is the last component.
-		# 	quantized_filter = zeros((filter_shape[0], filter_shape[1], num_channels))
-		# 	for channel_filter in quantized_chan_filter_list:
-		# 		channel_idx = channel_filter.channel_idx
-		# 		filter_U[:, :, channel_idx] = channel_filter.U
-		# 		quantized_filter[:,:, channel_idx] = channel_filter.q_filtr
-
-		# 	Q[:,:,:,filter_idx] = quantized_filter
-
-		# 	if self.logger:
-		# 		self.logger.info(f"\tFinished quantizing filter {filter_idx} of {num_filters}")
 
 		# Now quantize the neurons.
 		with ThreadPoolExecutor() as executor:
