@@ -19,7 +19,7 @@ from quantized_network import QuantizedNeuralNetwork, QuantizedCNN
 from sys import stdout
 
 # Write logs to file and to stdout. Overwrite previous log file.
-fh = logging.FileHandler('./train_logs/model_training.log', mode='w+')
+fh = logging.FileHandler('../train_logs/model_training.log', mode='w+')
 fh.setLevel(logging.INFO)
 sh = logging.StreamHandler(stream=stdout)
 sh.setLevel(logging.INFO)
@@ -203,9 +203,9 @@ if __name__ == '__main__':
 		trial_metrics = train_network(params)
 		if idx == 0:
 			# add the header
-			trial_metrics.to_csv(f'./model_metrics/{file_name}.csv', mode='a')
+			trial_metrics.to_csv(f'../model_metrics/{file_name}.csv', mode='a')
 		else:
-			trial_metrics.to_csv(f'./model_metrics/{file_name}.csv', mode='a', header=False)
+			trial_metrics.to_csv(f'../model_metrics/{file_name}.csv', mode='a', header=False)
 
 
 
