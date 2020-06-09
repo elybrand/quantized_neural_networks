@@ -1,13 +1,13 @@
-from numpy import array, zeros, dot, split, cumsum, median, nan, reshape
+from numpy import array, zeros, ones, inf, dot, split, cumsum, median, nan, reshape, ceil
 from numpy.random import permutation, randn
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
 from tensorflow.keras.models import Sequential, Model, clone_model
 from tensorflow.keras.layers import Dense
 from tensorflow.image import extract_patches
-# from tensorflow import reshape
 from typing import Optional, Callable, List, Generator
 from collections import namedtuple
+from itertools import product
 from matplotlib.pyplot import subplots
 from matplotlib.axes import Axes
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,14 +18,12 @@ SegmentedData = namedtuple("SegmentedData", ['wX_seg', 'qX_seg'])
 
 class QuantizedNeuralNetwork():
 
-	def __init__(self, network: Model, batch_size: int, get_data: Generator[array, None, None], logger=None, is_debug=False, ignore_layers=[]):
+	def __init__(self, network: Model, batch_size: int, get_data: Generator[array, None, None], logger=None, is_debug=False, ignore_layers=[], order=1):
 		"""
 		CAVEAT: Bias terms are not quantized!
 		REMEMBER: TensorFlow flips everything for you. Networks act via
 
 		# TODO: add verbose flag
-		# TODO: add functionality to scale weights into [-1, 1].
-
 
 		batch_size x N_ell 	   N_ell x N_{ell+1} 
 
@@ -66,16 +64,19 @@ class QuantizedNeuralNetwork():
 							if layer.__class__.__name__ == 'Dense'
 					}
 
+		self.order = order
+
 		# A dictionary with key being the layer index ell and the values being tensors.
 		# self.residuals[ell][neuron_idx, :] is a N_ell x batch_size matrix storing the residuals
 		# generated while quantizing the neuron_idx neuron.
 		self.residuals = {	        
 							layer_idx: zeros((
 										dims[1], # N_{ell+1} neurons,
-										dims[0], # N_{ell} dimensional feature
-										self.batch_size)) 		# Dimension of the residual vectors.
+										int(dims[0]/order), # N_{ell} dimensional feature, order bits per iteration.
+										self.batch_size)) 	# Dimension of the residual vectors.
 							for layer_idx, dims in self.layer_dims.items()
 						}
+
 
 		# Logs the relative error between the data fed through the unquantized network and the
 		# quantized network.
@@ -113,12 +114,117 @@ class QuantizedNeuralNetwork():
 			return 0
 		return -rad if t <= (-1.0 * rad)/2 else rad
 
-	def quantize_weight(self, w: float, u: array, X: array, X_tilde: array, rad: float) -> int:
+	def quantize_weight(self, w: float, u: array, X: array, X_tilde: array, rad: float) -> float:
 		# This is undefined if X_tilde is zero. In this case, return 0.
 		if norm(X_tilde,2) < 10**(-16):
 			return 0
 
+		if dot(X_tilde, u) < 10**(-16):
+			return self.bit_round(w, rad)
+
 		return self.bit_round(dot(X_tilde, u + w*X)/(norm(X_tilde,2)**2), rad)
+
+	# # This is for second order sigma delta only.
+	# def quantize_weight2(self, w: float, u1: array, u2: array, X: array, X_tilde: array, rad: float) -> float:
+	# 	if norm(X_tilde,2) < 10**(-16):
+	# 		return 0
+
+	# 	return self.bit_round(dot(X_tilde, 2*u1 - u2 + w*X)/norm(X_tilde,2)**2, rad)
+
+	# One-two step
+	def quantize_neuron2(self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1) -> QuantizedNeuron:
+		u_init = zeros(self.batch_size)
+		w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
+		N_ell = w.shape[0]
+		q = zeros(N_ell)
+
+		# Since we're iterating over two steps at a time, we only need half as many residual vectors
+		# to keep track of.
+		U = zeros((int(1.0*N_ell/2), self.batch_size))
+
+		# State variables for running the two competing strategies of two one-step iterations, and 
+		# one two-step iteration.
+		U1 = zeros((2, self.batch_size))
+		U2 = zeros(self.batch_size)
+
+		# Two first order steps. 
+		# breakpoint()
+		q11 = self.quantize_weight(w[0], u_init, wX[:,0], qX[:,0], rad)
+		U1[0,:] = u_init + w[0]*wX[:,0] - q11*qX[:,0]
+		q12 = self.quantize_weight(w[1], U1[0,:], wX[:,1], qX[:,1], rad)
+		U1[1,:] = U1[0,:] + w[1]*wX[:,1] - q12*qX[:,1]
+
+		# One second order step. You have to brute force search all possible ternary pairs here.
+		alphabet = (-rad, 0, rad)
+		q21, q22 = (nan, nan)
+		for (p1, p2) in product(alphabet, alphabet):
+			candidate_U2 = u_init + w[0]*wX[:,0] - p1*qX[:,0] + w[1]*wX[:,1] - p2*qX[:,1]
+			if norm(candidate_U2) < norm(U2) or q21 is nan:
+				U2 = candidate_U2
+				q21, q22 = p1, p2
+
+		# Now choose the pair of bits which minimize the norm of the residual.
+		if norm(U1[1,:]) < norm(U2):
+			q[0], q[1] = q11, q12
+			U[0,:] = U1[1,:]
+		else:
+			q[0], q[1] = q21, q22
+			U[0,:] = U2
+
+		# Now repeat the procedure.
+		for t in range(2, N_ell-1, 2):
+
+			U1 = zeros((2, self.batch_size))
+			U2 = zeros(self.batch_size)
+
+			q11 = self.quantize_weight(w[t], U[int(t/2)-1,:], wX[:,t], qX[:,t], rad)
+			U1[0,:] = U[int(t/2)-1,:] + w[t]*wX[:,t] - q11*qX[:,t]
+			q12 = self.quantize_weight(w[t], U1[0,:], wX[:,t], qX[:,t], rad)
+			U1[1,:] = U1[0,:] + w[t]*wX[:,t] - q12*qX[:,t]
+
+			alphabet = (-rad, 0, rad)
+			q21, q22 = (nan, nan)
+			for (p1, p2) in product(alphabet, alphabet):
+				candidate_U2 = U[int(t/2)-1,:] + w[t]*wX[:,t] - p1*qX[:,t] + w[t+1]*wX[:,t+1] - p2*qX[:,t+1]
+				if norm(candidate_U2) < norm(U2) or q21 is nan:
+					U2 = candidate_U2
+					q21, q22 = p1, p2
+
+			if norm(U1[1,:]) < norm(U2):
+				q[t], q[t+1] = q11, q12
+				U[int(t/2),:] = U1[1,:]
+			else:
+				q[t], q[t+1] = q21, q22
+				U[int(t/2),:] = U2
+
+		qNeuron = QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
+		return qNeuron
+
+	# # Second order Sigma Delta
+	# def quantize_neuron2(self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1) -> QuantizedNeuron:
+
+	# 	N_ell = wX.shape[1]
+	# 	u_init = zeros(self.batch_size)
+	# 	w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
+	# 	q = zeros(N_ell)
+	# 	U = zeros((N_ell, self.batch_size))
+		
+	# 	# One step of MSQ
+	# 	q[0] = self.quantize_weight(w[0], u_init, wX[:,0], qX[:,0], rad)
+	# 	U[0,:] = u_init + w[0]*wX[:,0] - q[0]*qX[:,0]
+
+	# 	# One step of first order Sigma Delta
+	# 	q[1] = self.quantize_weight2(w[0], U[0,:], u_init, wX[:,1], qX[:,1], rad)
+	# 	U[1,:] = 2*U[0,:] - u_init + w[1]*wX[:,1] - q[1] * qX[:,1]
+
+	# 	# Steps of second order.
+	# 	for t in range(1,N_ell):
+	# 		q[t] = self.quantize_weight2(w[t], U[t-1,:], U[t-2,:], wX[:,t], qX[:,t], rad)
+	# 		U[t,:] = 2*U[t-1,:] - U[t-2,:] + w[t]*wX[:,t] - q[t]*qX[:,t]
+
+	# 	qNeuron = QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
+
+	# 	return qNeuron
 
 	def quantize_neuron(self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1) -> QuantizedNeuron:
 
@@ -139,7 +245,7 @@ class QuantizedNeuralNetwork():
 
 		return qNeuron
 
-	def quantize_layer(self, layer_idx: int):
+	def quantize_layer(self, layer_idx: int, order:int):
 
 		W = self.trained_net.layers[layer_idx].get_weights()[0]
 		N_ell, N_ell_plus_1 = W.shape
@@ -177,7 +283,6 @@ class QuantizedNeuralNetwork():
 					break
 			qBatch = wBatch
 
-			# breakpoint()
 			wX = prev_trained_output([wBatch])[0]
 			qX = prev_quant_output([qBatch])[0]
 
@@ -192,7 +297,11 @@ class QuantizedNeuralNetwork():
 
 		# Now quantize the neurons.
 		with ThreadPoolExecutor() as executor:
-			future_to_neuron = {executor.submit(self.quantize_neuron, layer_idx, neuron_idx, wX, qX, rad): neuron_idx for neuron_idx in range(N_ell_plus_1)}
+
+			if order == 1:
+				future_to_neuron = {executor.submit(self.quantize_neuron, layer_idx, neuron_idx, wX, qX, rad): neuron_idx for neuron_idx in range(N_ell_plus_1)}
+			else:
+				future_to_neuron = {executor.submit(self.quantize_neuron2, layer_idx, neuron_idx, wX, qX, rad): neuron_idx for neuron_idx in range(N_ell_plus_1)}
 			for future in as_completed(future_to_neuron):
 				neuron_idx = future_to_neuron[future]
 				try:
@@ -208,9 +317,22 @@ class QuantizedNeuralNetwork():
 				if self.logger:
 					self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
 
+		# for neuron_idx in range(N_ell_plus_1):
+		# 	if order == 1:
+		# 		qNeuron = self.quantize_neuron(layer_idx, neuron_idx, wX, qX, rad)
+		# 	else:
+		# 		qNeuron = self.quantize_neuron2(layer_idx, neuron_idx, wX, qX, rad)
+		# 	Q[:, neuron_idx] = qNeuron.q
+		# 	self.residuals[layer_idx][neuron_idx,:] = qNeuron.U
+		# 	if self.logger:
+		# 		self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
+
 		# Update the quantized network. Use the same bias vector as in the analog network for now.
-		bias = self.trained_net.layers[layer_idx].get_weights()[1]
-		self.quantized_net.layers[layer_idx].set_weights([Q, bias])
+		if self.trained_net.layers[layer_idx].use_bias:
+			bias = self.trained_net.layers[layer_idx].get_weights()[1]
+			self.quantized_net.layers[layer_idx].set_weights([Q, bias])
+		else:
+			self.quantized_net.layers[layer_idx].set_weights([Q])
 
 		# Log the relative errors in the data incurred by quantizing this layer.
 		this_layer_trained_output = Kfunction([self.trained_net.layers[layer_idx].input],
@@ -231,7 +353,7 @@ class QuantizedNeuralNetwork():
 				# Only quantize dense layers.
 				if self.logger:
 					self.logger.info(f"Quantizing layer {layer_idx}...")
-				self.quantize_layer(layer_idx)
+				self.quantize_layer(layer_idx, self.order)
 
 	def neuron_dashboard(self, layer_idx: int, neuron_idx: int) -> Axes:
 
@@ -451,8 +573,11 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 					self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
 
 		# Update the quantized network. Use the same bias vector as in the analog network for now.
-		bias = self.trained_net.layers[layer_idx].get_weights()[1]
-		self.quantized_net.layers[layer_idx].set_weights([Q, bias])
+		if self.trained_net.layers[layer_idx].use_bias: 
+			bias = self.trained_net.layers[layer_idx].get_weights()[1]
+			self.quantized_net.layers[layer_idx].set_weights([Q, bias])
+		else:
+			self.quantized_net.layers[layer_idx].set_weights([Q])
 
 	def quantize_conv2D_layer(self, layer_idx: int):
 		# wX formatted as an array of images. No flattening.
@@ -521,8 +646,11 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 					self.logger.info(f"\tFinished quantizing filter {filter_idx} of {num_filters}")
 
 		# Now update the layer in the quantized network. Leave the bias the same for now.
-		b = self.quantized_net.layers[layer_idx].get_weights()[1]
-		self.quantized_net.layers[layer_idx].set_weights([Q, b])
+		if self.trained_net.layers[layer_idx].use_bias:
+			b = self.quantized_net.layers[layer_idx].get_weights()[1]
+			self.quantized_net.layers[layer_idx].set_weights([Q, b])
+		else:
+			self.quantized_net.layers[layer_idx].set_weights([Q])
 
 
 	def quantize_network(self):
