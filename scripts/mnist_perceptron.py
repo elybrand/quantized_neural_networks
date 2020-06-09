@@ -1,7 +1,5 @@
 import numpy as np
 import pandas as pd
-from math import sqrt, log
-import scipy.linalg as la
 import matplotlib.pyplot as plt
 import logging
 from tensorflow.keras.layers import Dense, BatchNormalization
@@ -14,7 +12,6 @@ from tensorflow.keras.initializers import (
 from tensorflow.keras.models import Sequential, clone_model
 from tensorflow.keras.datasets import mnist
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.backend import function as Kfunction
 from tensorflow.keras.optimizers import SGD
 from quantized_network import QuantizedNeuralNetwork
 from sys import stdout
@@ -68,7 +65,8 @@ X_quant_train = X_train[quant_train_idxs]
 y_quant_train = y_train[quant_train_idxs]
 
 # Build perceptron. We will vectorize the images.
-hidden_layer_sizes = [100]
+hidden_layer_sizes = [500, 250, 100]
+bits = 4
 activation = "relu"
 kernel_initializer = GlorotUniform()
 model = Sequential()
@@ -156,14 +154,13 @@ MSQ_model = clone_model(model)
 MSQ_model.set_weights(model.get_weights())
 for layer_idx, layer in enumerate(model.layers):
     if layer.__class__.__name__ == "Dense":
-        # Use the same radius as the ternary alphabet in the corresponding layer of the Sigma Delta network.
+        # Use the same radius as the alphabet in the corresponding layer of the Sigma Delta network.
         rad = max(my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten())
         W, b = model.layers[layer_idx].get_weights()
         m, N = W.shape
-        Q = np.zeros(W.shape)
-        Q[W >= rad / 2] = rad
-        Q[W <= -rad / 2] = -rad
-        Q[abs(W) < rad / 2] = 0
+        Q = np.array([my_quant_net.bit_round(w, rad) for w in W.flatten()]).reshape(
+            W.shape
+        )
         MSQ_model.layers[layer_idx].set_weights([Q, b])
 
 MSQ_model.compile(optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"])

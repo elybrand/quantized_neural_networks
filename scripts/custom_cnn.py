@@ -1,11 +1,7 @@
 import numpy as np
 import pandas as pd
-from math import sqrt, log
-import scipy.linalg as la
-import matplotlib.pyplot as plt
 import logging
 from itertools import product
-from concurrent.futures import ProcessPoolExecutor
 from collections import namedtuple
 from tensorflow.random import set_seed
 from tensorflow.keras.layers import (
@@ -24,9 +20,7 @@ from tensorflow.keras.initializers import (
 from tensorflow.keras.models import Sequential, clone_model
 from tensorflow.keras.datasets import mnist, cifar10
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.backend import function as Kfunction
-from tensorflow.keras.optimizers import SGD
-from quantized_network import QuantizedNeuralNetwork, QuantizedCNN
+from quantized_network import QuantizedCNN
 from sys import stdout
 
 # Write logs to file and to stdout. Overwrite previous log file.
@@ -58,6 +52,7 @@ epochs = [3]
 q_train_sizes = [2 * 128 * 3]
 ignore_layers = [[]]
 retrain_tries = [2]
+bits = [np.log2(i) for i in range(3, 8)]
 
 parameter_grid = product(
     data_sets,
@@ -73,11 +68,12 @@ parameter_grid = product(
     q_train_sizes,
     ignore_layers,
     retrain_tries,
+    bits,
 )
 
 ParamConfig = namedtuple(
     "ParamConfig",
-    "data_set, trial_idx, np_seed, tf_seed, rectifier, kernel_init, kernel_size, stride, train_batch_size, epochs, q_train_size, ignore_layer, retrain_tries",
+    "data_set, trial_idx, np_seed, tf_seed, rectifier, kernel_init, kernel_size, stride, train_batch_size, epochs, q_train_size, ignore_layer, retrain_tries, bits",
 )
 param_iterable = (ParamConfig(*config) for config in parameter_grid)
 
@@ -97,6 +93,7 @@ model_metrics = pd.DataFrame(
         "epochs": [],
         "q_train_size": [],
         "retrain_tries": [],
+        "bits": [],
         "analog_test_acc": [],
         "sd_test_acc": [],
         "msq_test_acc": [],
@@ -140,7 +137,6 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     y_net_train = y_train[net_train_idxs]
 
     X_quant_train = X_train[quant_train_idxs]
-    y_quant_train = y_train[quant_train_idxs]
 
     # Construct a basic convolutional neural network.
     model = Sequential()
@@ -213,6 +209,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             get_data=get_data,
             logger=logger,
             is_debug=is_debug,
+            bits=parameters.bits,
         )
         my_quant_net.quantize_network()
 
@@ -228,15 +225,14 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     MSQ_model.set_weights(model.get_weights())
     for layer_idx, layer in enumerate(model.layers):
         if layer.__class__.__name__ in ("Dense", "Conv2D"):
-            # Use the same radius as the ternary alphabet in the corresponding layer of the Sigma Delta network.
+            # Use the same radius as the alphabet in the corresponding layer of the Sigma Delta network.
             rad = max(
                 my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten()
             )
             W, b = model.layers[layer_idx].get_weights()
-            Q = np.zeros(W.shape)
-            Q[W >= rad / 2] = rad
-            Q[W <= -rad / 2] = -rad
-            Q[abs(W) < rad / 2] = 0
+            Q = np.array([my_quant_net.bit_round(w, rad) for w in W.flatten()]).reshape(
+                W.shape
+            )
             MSQ_model.layers[layer_idx].set_weights([Q, b])
 
     MSQ_model.compile(
@@ -264,6 +260,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             "epochs": parameters.epochs,
             "q_train_size": parameters.q_train_size,
             "retrain_tries": parameters.retrain_tries,
+            "bits": parameters.bits,
             "analog_test_acc": analog_accuracy,
             "sd_test_acc": q_accuracy,
             "msq_test_acc": MSQ_accuracy,

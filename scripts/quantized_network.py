@@ -1,27 +1,20 @@
 from numpy import (
     array,
     zeros,
-    ones,
-    inf,
     dot,
-    split,
-    cumsum,
     median,
     nan,
     reshape,
-    ceil,
     log2,
     linspace,
     argmin,
     abs,
 )
-from numpy.random import permutation, randn
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
-from tensorflow.keras.models import Sequential, Model, clone_model
-from tensorflow.keras.layers import Dense
+from tensorflow.keras.models import Model, clone_model
 from tensorflow.image import extract_patches
-from typing import Optional, Callable, List, Generator
+from typing import List, Generator
 from collections import namedtuple
 from itertools import product
 from matplotlib.pyplot import subplots
@@ -48,30 +41,30 @@ class QuantizedNeuralNetwork:
         bits=log2(3),
     ):
         """
-		CAVEAT: Bias terms are not quantized!
-		REMEMBER: TensorFlow flips everything for you. Networks act via
+        CAVEAT: Bias terms are not quantized!
+        REMEMBER: TensorFlow flips everything for you. Networks act via
 
-		# TODO: add verbose flag
+        # TODO: add verbose flag
 
-		batch_size x N_ell 	   N_ell x N_{ell+1} 
+        batch_size x N_ell     N_ell x N_{ell+1}
 
-		[ -- X_1^T -- ] 	[  |	 |		 |	]	
-		[ -- X_2^T -- ] 	[ w_1	w_2		w_3	] 
-		[	  .   	  ] 	[  |	 |		 |	]	
-		[	  .		  ]
-		[	  .		  ] 
-		[ -- X_B^T -- ] 
+        [ -- X_1^T -- ]     [  |     |       |  ]
+        [ -- X_2^T -- ]     [ w_1   w_2     w_3 ]
+        [     .       ]     [  |     |       |  ]
+        [     .       ]
+        [     .       ]
+        [ -- X_B^T -- ]
 
-		That means our residual matrix for quantizing the j^th neuron (i.e. w_j as detailed above) will be of the form
+        That means our residual matrix for quantizing the j^th neuron (i.e. w_j as detailed above) will be of the form
 
-			N_ell x batch_size
+            N_ell x batch_size
 
-		[ -- u1^T -- 	  ]
-		[	  .		 	  ]
-		[	  .		 	  ]
-		[	  .		 	  ]
-		[ -- u_N_ell^T -- ]
-		"""
+        [ -- u1^T --      ]
+        [     .           ]
+        [     .           ]
+        [     .           ]
+        [ -- u_N_ell^T -- ]
+        """
 
         self.get_data = get_data
 
@@ -171,10 +164,10 @@ class QuantizedNeuralNetwork:
 
     # # This is for second order sigma delta only.
     # def quantize_weight2(self, w: float, u1: array, u2: array, X: array, X_tilde: array, rad: float) -> float:
-    # 	if norm(X_tilde,2) < 10**(-16):
-    # 		return 0
+    #   if norm(X_tilde,2) < 10**(-16):
+    #       return 0
 
-    # 	return self.bit_round(dot(X_tilde, 2*u1 - u2 + w*X)/norm(X_tilde,2)**2, rad)
+    #   return self.bit_round(dot(X_tilde, 2*u1 - u2 + w*X)/norm(X_tilde,2)**2, rad)
 
     # One-two step
     def quantize_neuron2(
@@ -260,28 +253,28 @@ class QuantizedNeuralNetwork:
     # # Second order Sigma Delta
     # def quantize_neuron2(self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1) -> QuantizedNeuron:
 
-    # 	N_ell = wX.shape[1]
-    # 	u_init = zeros(self.batch_size)
-    # 	w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
-    # 	q = zeros(N_ell)
-    # 	U = zeros((N_ell, self.batch_size))
+    #   N_ell = wX.shape[1]
+    #   u_init = zeros(self.batch_size)
+    #   w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
+    #   q = zeros(N_ell)
+    #   U = zeros((N_ell, self.batch_size))
 
-    # 	# One step of MSQ
-    # 	q[0] = self.quantize_weight(w[0], u_init, wX[:,0], qX[:,0], rad)
-    # 	U[0,:] = u_init + w[0]*wX[:,0] - q[0]*qX[:,0]
+    #   # One step of MSQ
+    #   q[0] = self.quantize_weight(w[0], u_init, wX[:,0], qX[:,0], rad)
+    #   U[0,:] = u_init + w[0]*wX[:,0] - q[0]*qX[:,0]
 
-    # 	# One step of first order Sigma Delta
-    # 	q[1] = self.quantize_weight2(w[0], U[0,:], u_init, wX[:,1], qX[:,1], rad)
-    # 	U[1,:] = 2*U[0,:] - u_init + w[1]*wX[:,1] - q[1] * qX[:,1]
+    #   # One step of first order Sigma Delta
+    #   q[1] = self.quantize_weight2(w[0], U[0,:], u_init, wX[:,1], qX[:,1], rad)
+    #   U[1,:] = 2*U[0,:] - u_init + w[1]*wX[:,1] - q[1] * qX[:,1]
 
-    # 	# Steps of second order.
-    # 	for t in range(1,N_ell):
-    # 		q[t] = self.quantize_weight2(w[t], U[t-1,:], U[t-2,:], wX[:,t], qX[:,t], rad)
-    # 		U[t,:] = 2*U[t-1,:] - U[t-2,:] + w[t]*wX[:,t] - q[t]*qX[:,t]
+    #   # Steps of second order.
+    #   for t in range(1,N_ell):
+    #       q[t] = self.quantize_weight2(w[t], U[t-1,:], U[t-2,:], wX[:,t], qX[:,t], rad)
+    #       U[t,:] = 2*U[t-1,:] - U[t-2,:] + w[t]*wX[:,t] - q[t]*qX[:,t]
 
-    # 	qNeuron = QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
+    #   qNeuron = QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
 
-    # 	return qNeuron
+    #   return qNeuron
 
     def quantize_neuron(
         self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1
@@ -395,14 +388,14 @@ class QuantizedNeuralNetwork:
                     )
 
         # for neuron_idx in range(N_ell_plus_1):
-        # 	if order == 1:
-        # 		qNeuron = self.quantize_neuron(layer_idx, neuron_idx, wX, qX, rad)
-        # 	else:
-        # 		qNeuron = self.quantize_neuron2(layer_idx, neuron_idx, wX, qX, rad)
-        # 	Q[:, neuron_idx] = qNeuron.q
-        # 	self.residuals[layer_idx][neuron_idx,:] = qNeuron.U
-        # 	if self.logger:
-        # 		self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
+        #   if order == 1:
+        #       qNeuron = self.quantize_neuron(layer_idx, neuron_idx, wX, qX, rad)
+        #   else:
+        #       qNeuron = self.quantize_neuron2(layer_idx, neuron_idx, wX, qX, rad)
+        #   Q[:, neuron_idx] = qNeuron.q
+        #   self.residuals[layer_idx][neuron_idx,:] = qNeuron.U
+        #   if self.logger:
+        #       self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}")
 
         # Update the quantized network. Use the same bias vector as in the analog network for now.
         if self.trained_net.layers[layer_idx].use_bias:
@@ -676,9 +669,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         W = self.trained_net.layers[layer_idx].get_weights()[0]
         Q = zeros(W.shape)
         N_ell_plus_1 = W.shape[1]
-        num_channels = W.shape[
-            -2
-        ]  # The last index is the number of filters in this case.
         batch = zeros((self.batch_size, *input_shape))
         for sample_idx in range(self.batch_size):
             try:
