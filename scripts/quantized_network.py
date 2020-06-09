@@ -154,10 +154,13 @@ class QuantizedNeuralNetwork:
         self, w: float, u: array, X: array, X_tilde: array, rad: float
     ) -> float:
         # This is undefined if X_tilde is zero. In this case, return 0.
+
+        # breakpoint()
+
         if norm(X_tilde, 2) < 10 ** (-16):
             return 0
 
-        if dot(X_tilde, u) < 10 ** (-16):
+        if abs(dot(X_tilde, u)) < 10 ** (-16):
             return self.bit_round(w, rad)
 
         return self.bit_round(dot(X_tilde, u + w * X) / (norm(X_tilde, 2) ** 2), rad)
@@ -288,7 +291,6 @@ class QuantizedNeuralNetwork:
         # Take columns of the data matrix, since the samples are given via the rows.
         q[0] = self.quantize_weight(w[0], u_init, wX[:, 0], qX[:, 0], rad)
         U[0, :] = u_init + w[0] * wX[:, 0] - q[0] * qX[:, 0]
-
         for t in range(1, N_ell):
             q[t] = self.quantize_weight(w[t], U[t - 1, :], wX[:, t], qX[:, t], rad)
             U[t, :] = U[t - 1, :] + w[t] * wX[:, t] - q[t] * qX[:, t]
@@ -346,8 +348,11 @@ class QuantizedNeuralNetwork:
             self.layerwise_directions[layer_idx]["qX"] = qX
 
         # Set the radius of the ternary alphabet.
-        alpha = 1  # This is somewhat arbitrary.
-        rad = alpha * median(abs(W.flatten()))
+        # TODO: FIX THIS
+        # alpha = 1  # This is somewhat arbitrary.
+        # rad = alpha * median(abs(W.flatten()))
+
+        rad = 1
 
         # Now quantize the neurons.
         with ThreadPoolExecutor() as executor:

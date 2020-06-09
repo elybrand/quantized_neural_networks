@@ -22,18 +22,25 @@ from sys import stdout
 N0 = 10 ** 3
 N1 = 1
 B = 500
-w = 0.5 * np.ones(N0)
+w = np.random.rand(N0)
+# w = 0.5 * np.ones(N0)
 
 X = np.zeros((B, N0))
 X[:, 0] = np.random.randn(B)
 X[:, 0] = X[:, 0] / la.norm(X[:, 0])
-u = 0.5 * X[:, 0]
-norms = np.zeros(N0)
-for i in range(1, N0):
-    # Always select a direction which is orthogonal to u.
-    X[:, i] = la.null_space([u])[:, 0]
-    u += 0.5 * X[:, i]
-    norms[i] = la.norm(u)
+
+# # Adversarial orthogonal walk
+# u = 0.5 * X[:, 0]
+# norms = np.zeros(N0)
+# for i in range(1, N0):
+#     # Always select a direction which is orthogonal to u.
+#     X[:, i] = la.null_space([u])[:, 0]
+#     u += 0.5 * X[:, i]
+#     norms[i] = la.norm(u)
+
+# Parallel walk.
+X = np.zeros((B, N0))
+X[0, :] = 1
 
 get_data = (sample for sample in X)
 get_data2 = (sample for sample in X)
@@ -60,10 +67,15 @@ ax.plot(
         for val in pair
     ],
 )
-ax.legend(["First Order", "Second Order"])
-ax.set_xlabel(r"$t$")
-ax.set_ylabel(r"$||u_t||$")
-ax.set_title("Residual Across Iterations")
+ax.legend(["One Step", "One-Two Step"])
+ax.set_xlabel(r"$t$", fontsize=14)
+ax.set_ylabel(r"$||u_t||$", fontsize=14)
+ax.set_title("One Step vs One-Two Step Residuals", fontsize=20)
+caption = (
+    "Caption: Residuals for the one step and one-two step quantization methods for the one dimensional walk."
+    "Weights are initialized to be uniform(0,1). Directions are unit norm. No bias or rectifier were used. The quantization alphabet was ternary."
+)
+fig.text(0.5, 0.01, caption, ha="center", wrap=True, fontsize=12)
 
 w = w.reshape((N0, 1))
 q = SD2.quantized_net.layers[0].get_weights()[0]
