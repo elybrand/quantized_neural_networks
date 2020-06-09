@@ -52,7 +52,7 @@ epochs = [3]
 q_train_sizes = [2 * 128 * 3]
 ignore_layers = [[]]
 retrain_tries = [2]
-bits = [np.log2(i) for i in range(3, 8)]
+bits = [np.log2(i) for i in range(3, 6)]
 
 parameter_grid = product(
     data_sets,
@@ -172,7 +172,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         if train_idx == 0:
             # Initialize the weights using the kernel_initializer provided.
             logger.info(
-                f"Training with parameters {parameters}. Training iteration {train_idx} of {parameters.retrain_tries}."
+                f"Training with parameters {parameters}. Training iteration {train_idx+1} of {parameters.retrain_tries}."
             )
             history = model.fit(
                 X_net_train,
@@ -185,7 +185,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         else:
             # Initialize using the quantized network's weights.
             logger.info(
-                f"Retraining with parameters {parameters}. Training iteration {train_idx} of {parameters.retrain_tries}."
+                f"Retraining with parameters {parameters}. Training iteration {train_idx+1} of {parameters.retrain_tries}."
             )
             model.set_weights(my_quant_net.quantized_net.get_weights())
             history = model.fit(
