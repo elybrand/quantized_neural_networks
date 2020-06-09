@@ -1,4 +1,20 @@
-from numpy import array, zeros, ones, inf, dot, split, cumsum, median, nan, reshape, ceil
+from numpy import (
+    array,
+    zeros,
+    ones,
+    inf,
+    dot,
+    split,
+    cumsum,
+    median,
+    nan,
+    reshape,
+    ceil,
+    log2,
+    linspace,
+    argmin,
+    abs,
+)
 from numpy.random import permutation, randn
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
@@ -29,6 +45,7 @@ class QuantizedNeuralNetwork:
         is_debug=False,
         ignore_layers=[],
         order=1,
+        bits=log2(3),
     ):
         """
 		CAVEAT: Bias terms are not quantized!
@@ -77,6 +94,13 @@ class QuantizedNeuralNetwork:
         }
 
         self.order = order
+
+        # This determines the alphabet. There will be 2**bits atoms in our alphabet.
+        self.bits = bits
+
+        # Construct the (unscaled) alphabet. Layers will scale this alphabet based on the
+        # distribution of that layer's weights.
+        self.alphabet = linspace(-1, 1, num=int(round(2 ** (bits))))
 
         # A dictionary with key being the layer index ell and the values being tensors.
         # self.residuals[ell][neuron_idx, :] is a N_ell x batch_size matrix storing the residuals
@@ -128,9 +152,10 @@ class QuantizedNeuralNetwork:
             }
 
     def bit_round(self, t: float, rad: float) -> int:
-        if abs(t) < (1.0 * rad) / 2:
-            return 0
-        return -rad if t <= (-1.0 * rad) / 2 else rad
+
+        # Scale the alphabet appropriately.
+        layer_alphabet = rad * self.alphabet
+        return layer_alphabet[argmin(abs(layer_alphabet - t))]
 
     def quantize_weight(
         self, w: float, u: array, X: array, X_tilde: array, rad: float
@@ -503,6 +528,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         get_data: Generator[array, None, None],
         logger=None,
         is_debug=False,
+        bits=log2(3),
     ):
         self.get_data = get_data
 
@@ -512,6 +538,13 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # This copies the network structure but not the weights.
         self.quantized_net = clone_model(network)
         self.quantized_net.set_weights(network.get_weights())
+
+        # This determines the alphabet. There will be 2**bits atoms in our alphabet.
+        self.bits = bits
+
+        # Construct the (unscaled) alphabet. Layers will scale this alphabet based on the
+        # distribution of that layer's weights.
+        self.alphabet = linspace(-1, 1, num=int(round(2 ** (bits))))
 
         # This quantifies how many images are used in a given batch to train a layer. This is subtly different
         # than the batch_size for the perceptron case because the actual data here are *patches* of images.
@@ -672,8 +705,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
             # I wonder if this is where you run into memory issues...forcing all the data through the network at once
             # rather than doing it in batches.
-            wX = prev_trained_output([batch])[0]
-            qX = prev_quant_output([batch])[0]
+            wX = prev_trained_output(batch)[0]
+            qX = prev_quant_output(batch)[0]
 
         # Set the radius of the ternary alphabet.
         alpha = 1  # This is somewhat arbitrary.

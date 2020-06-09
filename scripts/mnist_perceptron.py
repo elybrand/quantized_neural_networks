@@ -31,7 +31,7 @@ train, test = mnist.load_data()
 # Split the training data into two populations. One for training the network and
 # one for training the quantization. For now, split it evenly.
 train_size = train[0].shape[0]
-quant_train_size = int(1.5 * 10 ** 4)
+quant_train_size = int(2 * 128 * 4)
 net_train_size = train_size - quant_train_size
 net_train_idxs = np.random.choice(train_size, size=net_train_size, replace=False)
 quant_train_idxs = list(set(np.arange(train_size)) - set(net_train_idxs))
@@ -68,7 +68,7 @@ X_quant_train = X_train[quant_train_idxs]
 y_quant_train = y_train[quant_train_idxs]
 
 # Build perceptron. We will vectorize the images.
-hidden_layer_sizes = [500, 250, 100]
+hidden_layer_sizes = [100]
 activation = "relu"
 kernel_initializer = GlorotUniform()
 model = Sequential()
@@ -124,6 +124,7 @@ my_quant_net = QuantizedNeuralNetwork(
     ignore_layers=ignore_layers,
     is_debug=is_debug,
     order=1,
+    bits=np.log2(5),
 )
 my_quant_net2 = QuantizedNeuralNetwork(
     network=model,
@@ -133,6 +134,7 @@ my_quant_net2 = QuantizedNeuralNetwork(
     ignore_layers=ignore_layers,
     is_debug=is_debug,
     order=2,
+    bits=np.log2(5),
 )
 my_quant_net.quantize_network()
 my_quant_net2.quantize_network()

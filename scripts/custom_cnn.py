@@ -55,7 +55,7 @@ kernel_sizes = [4]
 strides = [2]
 train_batch_sizes = [128]
 epochs = [3]
-q_train_sizes = [10 ** 4]
+q_train_sizes = [2 * 128 * 3]
 ignore_layers = [[]]
 retrain_tries = [2]
 
