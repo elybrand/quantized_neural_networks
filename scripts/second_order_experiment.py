@@ -25,9 +25,9 @@ B = 500
 w = np.random.rand(N0)
 # w = 0.5 * np.ones(N0)
 
-X = np.zeros((B, N0))
-X[:, 0] = np.random.randn(B)
-X[:, 0] = X[:, 0] / la.norm(X[:, 0])
+# X = np.zeros((B, N0))
+# X[:, 0] = np.random.randn(B)
+# X[:, 0] = X[:, 0] / la.norm(X[:, 0])
 
 # # Adversarial orthogonal walk
 # u = 0.5 * X[:, 0]

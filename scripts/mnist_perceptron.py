@@ -65,8 +65,7 @@ X_quant_train = X_train[quant_train_idxs]
 y_quant_train = y_train[quant_train_idxs]
 
 # Build perceptron. We will vectorize the images.
-hidden_layer_sizes = [500, 250, 100]
-bits = 4
+hidden_layer_sizes = [100]
 activation = "relu"
 kernel_initializer = GlorotUniform()
 model = Sequential()
@@ -112,8 +111,10 @@ get_data = (sample for sample in X_quant_train)
 get_data2 = (sample for sample in X_quant_train)
 # Make it so all data are used.
 batch_size = int(np.floor(quant_train_size / (len(hidden_layer_sizes) + 1)))
+alphabet_scalar = 2
 ignore_layers = []  # [num_layers-1]
 is_debug = False
+bits = np.log2(3)
 my_quant_net = QuantizedNeuralNetwork(
     network=model,
     batch_size=batch_size,
@@ -122,7 +123,8 @@ my_quant_net = QuantizedNeuralNetwork(
     ignore_layers=ignore_layers,
     is_debug=is_debug,
     order=1,
-    bits=np.log2(5),
+    bits=bits,
+    alphabet_scalar=alphabet_scalar,
 )
 my_quant_net2 = QuantizedNeuralNetwork(
     network=model,
@@ -132,7 +134,8 @@ my_quant_net2 = QuantizedNeuralNetwork(
     ignore_layers=ignore_layers,
     is_debug=is_debug,
     order=2,
-    bits=np.log2(5),
+    bits=bits,
+    alphabet_scalar=alphabet_scalar,
 )
 my_quant_net.quantize_network()
 my_quant_net2.quantize_network()
