@@ -3,7 +3,7 @@ import pandas as pd
 from scipy.stats import mode
 import matplotlib.pyplot as plt
 import logging
-from tensorflow.keras.layers import Dense, BatchNormalization
+from tensorflow.keras.layers import Dense, BatchNormalization, Dropout
 from tensorflow.keras.initializers import (
     RandomNormal,
     GlorotUniform,
@@ -30,11 +30,12 @@ train, test = mnist.load_data()
 # Split the training data into two populations. One for training the network and
 # one for training the quantization. For now, split it evenly.
 train_size = train[0].shape[0]  # Total number of samples to use for training.
+global_quant_train_size = int(0.5 * train_size)
 quant_train_size = int(
-    3 * 128 * 4
+    2 * 500 * 4
 )  # number of samples to use for training one quantization of a net.
-num_quantize_epochs = 10  # number of different quantizations for a given net to try out (using different data)
-net_train_size = train_size - num_quantize_epochs * quant_train_size
+num_quantize_epochs = 1  # number of different quantizations for a given net to try out (using different data)
+net_train_size = train_size - global_quant_train_size
 net_train_idxs = np.random.choice(train_size, size=net_train_size, replace=False)
 quant_train_idxs = list(set(np.arange(train_size)) - set(net_train_idxs))
 
@@ -45,8 +46,8 @@ X_test, y_test = test
 # fig, axes = plt.subplots(5, 5)
 # axes = axes.ravel()
 # for i in range(len(axes)):
-# 	axes[i].imshow(X_train[i])
-# 	axes[i].axis('off')
+#   axes[i].imshow(X_train[i])
+#   axes[i].axis('off')
 
 # # Normalize pixel values
 # X_train = X_train/255
@@ -84,6 +85,7 @@ model.add(
 model.add(BatchNormalization(epsilon=10 ** (-5)))
 # Add hidden layers
 for layer_size in hidden_layer_sizes[1:]:
+    model.add(Dropout(rate=0.5))
     model.add(
         Dense(
             layer_size,
@@ -115,9 +117,10 @@ for q_epoch in range(num_quantize_epochs):
     logger.info(f"Quantizing with epoch {q_epoch+1} out of {num_quantize_epochs}")
     # Select data from the global pool of data available for quantization.
     # Sample with replacement across each epoch because I'm lazy.
-    q_epoch_idxs = quant_train_idxs[
-        np.random.choice(
-            num_quantize_epochs * quant_train_size, size=quant_train_size, replace=False
+    q_epoch_idxs = [
+        quant_train_idxs[i]
+        for i in np.random.choice(
+            global_quant_train_size, size=quant_train_size, replace=False
         )
     ]
     X_quant_train = X_train[q_epoch_idxs]
@@ -127,7 +130,6 @@ for q_epoch in range(num_quantize_epochs):
     batch_size = int(np.floor(quant_train_size / (len(hidden_layer_sizes) + 1)))
     alphabet_scalar = 2
     ignore_layers = []  # [num_layers-1]
-    is_debug = False
     bits = np.log2(3)
     my_quant_net = QuantizedNeuralNetwork(
         network=model,
@@ -135,7 +137,6 @@ for q_epoch in range(num_quantize_epochs):
         get_data=get_data,
         logger=logger,
         ignore_layers=ignore_layers,
-        is_debug=is_debug,
         order=1,
         bits=bits,
         alphabet_scalar=alphabet_scalar,
@@ -146,7 +147,6 @@ for q_epoch in range(num_quantize_epochs):
         get_data=get_data2,
         logger=logger,
         ignore_layers=ignore_layers,
-        is_debug=is_debug,
         order=2,
         bits=bits,
         alphabet_scalar=alphabet_scalar,
@@ -169,8 +169,8 @@ for q_epoch in range(num_quantize_epochs):
 Q1 = list(map(lambda layer: layer.get_weights(), model.layers))
 Q2 = list(map(lambda layer: layer.get_weights(), model.layers))
 for layer_idx, layer in enumerate(model.layers):
-    W = layer.get_weights()[0]
     if layer.__class__.__name__ in ("Dense", "Conv2D") and layer_idx not in ignore_layers:
+        W = layer.get_weights()[0]
         Q1_candidates = np.zeros((num_quantize_epochs, *W.flatten().shape))
         Q2_candidates = np.zeros((num_quantize_epochs, *W.flatten().shape))
         for Q_idx in range(num_quantize_epochs):
@@ -200,11 +200,12 @@ q_loss, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose
 q2_loss, q2_accuracy = my_quant_net2.quantized_net.evaluate(X_test, y_test, verbose=True)
 
 # Construct MSQ Net.
+logger.info("Constructing MSQ net...")
 MSQ_model = clone_model(model)
 # Set all the weights to be equal at first. This matters for batch normalization layers.
 MSQ_model.set_weights(model.get_weights())
 for layer_idx, layer in enumerate(model.layers):
-    if layer.__class__.__name__ == "Dense":
+    if layer.__class__.__name__ in ("Dense", "Conv2D") and layer_idx not in ignore_layers:
         # Use the same radius as the alphabet in the corresponding layer of the Sigma Delta network.
         rad = max(my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten())
         W, b = model.layers[layer_idx].get_weights()
@@ -238,36 +239,47 @@ SD_tmp_net.set_weights(model.get_weights())
 SD2_tmp_net = clone_model(model)
 SD2_tmp_net.set_weights(model.get_weights())
 
+logger.info("Computing layerwise statistics...")
 for layer_idx, layer in enumerate(model.layers):
-    W = layer.get_weights()[0]
-    supp_W = sum(W.flatten() != 0)
+    if layer.__class__.__name__ in ("Dense", "Conv2D") and layer_idx not in ignore_layers:
+        W = layer.get_weights()[0]
+        supp_W = sum(W.flatten() != 0)
 
-    MSQ_wts = MSQ_model.layers[layer_idx].get_weights()
-    MSQ_tmp_net.layers[layer_idx].set_weights(MSQ_wts)
-    MSQ_tmp_net.compile(
-        optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
-    )
-    loss, acc = MSQ_tmp_net.evaluate(X_test, y_test, verbose=False)
-    MSQ_metrics["accuracy"][layer_idx] = acc
-    MSQ_metrics["compression"][layer_idx] = sum(MSQ_wts[0].flatten() != 0) / supp_W
+        MSQ_wts = MSQ_model.layers[layer_idx].get_weights()
+        MSQ_tmp_net.layers[layer_idx].set_weights(MSQ_wts)
+        MSQ_tmp_net.compile(
+            optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
+        )
+        loss, acc = MSQ_tmp_net.evaluate(X_test, y_test, verbose=False)
+        MSQ_metrics["accuracy"][layer_idx] = acc
+        MSQ_metrics["compression"][layer_idx] = sum(MSQ_wts[0].flatten() != 0) / supp_W
 
-    SD_wts = my_quant_net.quantized_net.layers[layer_idx].get_weights()
-    SD_tmp_net.layers[layer_idx].set_weights(SD_wts)
-    SD_tmp_net.compile(
-        optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
-    )
-    loss, acc = SD_tmp_net.evaluate(X_test, y_test, verbose=False)
-    SD_metrics["accuracy"][layer_idx] = acc
-    SD_metrics["compression"][layer_idx] = sum(SD_wts[0].flatten() != 0) / supp_W
+        SD_wts = my_quant_net.quantized_net.layers[layer_idx].get_weights()
+        SD_tmp_net.layers[layer_idx].set_weights(SD_wts)
+        SD_tmp_net.compile(
+            optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
+        )
+        loss, acc = SD_tmp_net.evaluate(X_test, y_test, verbose=False)
+        SD_metrics["accuracy"][layer_idx] = acc
+        SD_metrics["compression"][layer_idx] = sum(SD_wts[0].flatten() != 0) / supp_W
 
-    SD2_wts = my_quant_net2.quantized_net.layers[layer_idx].get_weights()
-    SD2_tmp_net.layers[layer_idx].set_weights(SD2_wts)
-    SD2_tmp_net.compile(
-        optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
-    )
-    loss, acc = SD2_tmp_net.evaluate(X_test, y_test, verbose=False)
-    SD2_metrics["accuracy"][layer_idx] = acc
-    SD2_metrics["compression"][layer_idx] = sum(SD2_wts[0].flatten() != 0) / supp_W
+        SD2_wts = my_quant_net2.quantized_net.layers[layer_idx].get_weights()
+        SD2_tmp_net.layers[layer_idx].set_weights(SD2_wts)
+        SD2_tmp_net.compile(
+            optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
+        )
+        loss, acc = SD2_tmp_net.evaluate(X_test, y_test, verbose=False)
+        SD2_metrics["accuracy"][layer_idx] = acc
+        SD2_metrics["compression"][layer_idx] = sum(SD2_wts[0].flatten() != 0) / supp_W
+    else:
+        MSQ_metrics["accuracy"][layer_idx] = MSQ_metrics["accuracy"][layer_idx - 1]
+        MSQ_metrics["compression"][layer_idx] = 1
+
+        SD_metrics["accuracy"][layer_idx] = SD_metrics["accuracy"][layer_idx - 1]
+        SD_metrics["compression"][layer_idx] = 1
+
+        SD2_metrics["accuracy"][layer_idx] = SD2_metrics["accuracy"][layer_idx - 1]
+        SD2_metrics["compression"][layer_idx] = 1
 
 # Plot accuracies and compression ratios
 fig, axes = plt.subplots(1, 2, figsize=(15, 8))
