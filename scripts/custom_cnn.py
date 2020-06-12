@@ -42,17 +42,17 @@ np.random.seed(np_seed)
 
 # Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
 data_sets = ["mnist"]
-trial_idxs = [0]
+trial_idxs = [0, 1, 2, 3, 4]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]
-kernel_sizes = [4]
+kernel_sizes = [3,  5,  7]
 strides = [2]
 train_batch_sizes = [128]
-epochs = [3]
-q_train_sizes = [2 * 128 * 3]
+epochs = [10]
+q_train_sizes = [10**4]
 ignore_layers = [[]]
-retrain_tries = [2]
-bits = [np.log2(i) for i in range(3, 6)]
+retrain_tries = [1, 2, 3]
+bits = [np.log2(i) for i in range(3, 8)]
 
 parameter_grid = product(
     data_sets,
@@ -150,6 +150,9 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             input_shape=input_shape,
         )
     )
+
+    #TODO: Max pooling, 2x2 pixels with stride of 2.
+
     model.add(BatchNormalization())
     model.add(
         Conv2D(
@@ -160,6 +163,9 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             activation=parameters.rectifier,
         )
     )
+
+    #TODO: Max pooling, 2x2 pixels with stride of 2
+
     model.add(BatchNormalization())
     model.add(Flatten())
     model.add(Dense(10, activation="softmax"))
