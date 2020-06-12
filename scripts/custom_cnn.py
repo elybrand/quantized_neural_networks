@@ -18,11 +18,12 @@ from tensorflow.keras.initializers import (
     GlorotNormal,
     RandomUniform,
 )
-from tensorflow.keras.models import Sequential, clone_model
+from tensorflow.keras.models import Sequential, clone_model, save_model
 from tensorflow.keras.datasets import mnist, cifar10
 from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedCNN
 from sys import stdout
+from os import mkdir
 
 # Write logs to file and to stdout. Overwrite previous log file.
 fh = logging.FileHandler("../train_logs/model_training.log", mode="w+")
@@ -35,13 +36,6 @@ logger.setLevel(level=logging.INFO)
 logger.addHandler(fh)
 logger.addHandler(sh)
 
-# Set the random seeds for numpy and tensorflow.
-np_seed = 0
-tf_seed = 0
-set_seed(tf_seed)
-np.random.seed(np_seed)
-
-
 # Output shape of conv2d layer is
 # np.floor((height - kernel_height + padding + stride)/stride) x ...
 
@@ -53,41 +47,62 @@ np.random.seed(np_seed)
 # This parameter grid assumes the following network topology:
 # Conv2D -> MaxPooling2D -> BatchNormalization -> Dropout -> Conv2D -> MaxPooling2D -> BatchNormalization -> Dropout -> Dense
 
+# Make a directory to store serialized models.
+timestamp = str(pd.Timestamp.now())
+serialized_model_dir = f"../serialized_models/experiment_{timestamp}".replace(" ", "_")
+mkdir(serialized_model_dir)
 
 # Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
 data_sets = ["mnist"]
-trial_idxs = [0]
+np_seeds = [0]
+tf_seeds = [0]
+kernels_per_layer = [(8, 4)]  # , (16, 8), (32, 16), (64, 32)]
 rectifiers = ["relu"]
-kernel_inits = [GlorotUniform]
-kernel_sizes = [3]
-strides = [2]
+kernel_inits = [GlorotUniform]  # , GlorotNormal, RandomUniform]
+conv_kernel_sizes = [
+    (2, 2),
+    # (3, 2),
+]  # All kernels assumed to be square. Tuples indicate shapes per layer.
+conv_strides = [
+    (2, 2)
+]  # Strides assumed to be equal along all dimensions. Tuples indicate shapes per layer.
+dropout_rates = [(0.2, 0.2)]  # , (0.5, 0.5)]
+pool_sizes = [(2, 2)]  # , (3, 2)]
+pool_strides = [(2, 2)]
 train_batch_sizes = [128]
-epochs = [10]
+epochs = [1]
 q_train_sizes = [10 ** 4]
 ignore_layers = [[]]
 retrain_tries = [1]
-bits = [np.log2(i) for i in range(3, 4)]
+retrain_init = ["greedy"]
+bits = [np.log2(3)]  # for i in  (3, 8, 16)]
 
 parameter_grid = product(
     data_sets,
-    trial_idxs,
-    [np_seed],
-    [tf_seed],
+    np_seeds,
+    tf_seeds,
+    kernels_per_layer,
     rectifiers,
     kernel_inits,
-    kernel_sizes,
-    strides,
+    conv_kernel_sizes,
+    conv_strides,
+    dropout_rates,
+    pool_sizes,
+    pool_strides,
     train_batch_sizes,
     epochs,
     q_train_sizes,
     ignore_layers,
     retrain_tries,
+    retrain_init,
     bits,
 )
 
 ParamConfig = namedtuple(
     "ParamConfig",
-    "data_set, trial_idx, np_seed, tf_seed, rectifier, kernel_init, kernel_size, stride, train_batch_size, epochs, q_train_size, ignore_layer, retrain_tries, bits",
+    "data_set, np_seed, tf_seed, kernels_per_layer, rectifier, kernel_init, conv_kernel_sizes, conv_strides, "
+    "dropout_rates, pool_sizes, pool_strides, train_batch_size, epochs, q_train_size, ignore_layers, retrain_tries,"
+    "retrain_init, bits",
 )
 param_iterable = (ParamConfig(*config) for config in parameter_grid)
 
@@ -98,15 +113,20 @@ model_metrics = pd.DataFrame(
         "np_seed": [],
         "tf_seed": [],
         "serialized_model": [],
-        "trial_idx": [],
+        "kernels_per_layer": [],
         "rectifier": [],
         "kernel_init": [],
-        "kernel_size": [],
-        "strides": [],
+        "conv_kernel_sizes": [],
+        "conv_strides": [],
+        "dropout_rates": [],
+        "pool_sizes": [],
+        "pool_strides": [],
         "train_batch_size": [],
         "epochs": [],
         "q_train_size": [],
+        "ignore_layers": [],
         "retrain_tries": [],
+        "retrain_init": [],
         "bits": [],
         "analog_test_acc": [],
         "sd_test_acc": [],
@@ -117,6 +137,10 @@ model_metrics = pd.DataFrame(
 
 
 def train_network(parameters: ParamConfig) -> pd.DataFrame:
+
+    # Set the random seeds for numpy and tensorflow.
+    set_seed(parameters.tf_seed)
+    np.random.seed(parameters.np_seed)
 
     # Split training from testing
     train, test = globals()[parameters.data_set].load_data()
@@ -157,37 +181,48 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     # model.add(Dropout(0.2, input_shape=input_shape))
     model.add(
         Conv2D(
-            filters=64,
-            kernel_size=parameters.kernel_size,
-            strides=(parameters.stride, parameters.stride),
+            filters=parameters.kernels_per_layer[0],
+            kernel_size=parameters.conv_kernel_sizes[0],
+            strides=(parameters.conv_strides[0], parameters.conv_strides[0]),
             activation=parameters.rectifier,
             kernel_initializer=parameters.kernel_init(),
             input_shape=input_shape,
         )
     )
 
-    model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2), padding="valid"))
+    model.add(
+        MaxPooling2D(
+            pool_size=(parameters.pool_sizes[0], parameters.pool_sizes[0]),
+            strides=(parameters.pool_strides[0], parameters.pool_strides[0]),
+            padding="valid",
+        )
+    )
 
     model.add(BatchNormalization())
-    model.add(Dropout(0.2, input_shape=input_shape))
+    model.add(Dropout(parameters.dropout_rates[0]))
     model.add(
         Conv2D(
-            filters=32,
-            kernel_size=parameters.kernel_size,
-            strides=(parameters.stride, parameters.stride),
+            filters=parameters.kernels_per_layer[1],
+            kernel_size=parameters.conv_kernel_sizes[1],
+            strides=(parameters.conv_strides[1], parameters.conv_strides[1]),
             kernel_initializer=parameters.kernel_init(),
             activation=parameters.rectifier,
         )
     )
 
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"))
+    model.add(
+        MaxPooling2D(
+            pool_size=(parameters.pool_sizes[1], parameters.pool_sizes[1]),
+            strides=(parameters.pool_strides[1], parameters.pool_strides[1]),
+            padding="valid",
+        )
+    )
 
     model.add(BatchNormalization())
     model.add(Flatten())
-    model.add(Dropout(0.2, input_shape=input_shape))
+    model.add(Dropout(parameters.dropout_rates[1]))
     model.add(Dense(10, activation="softmax"))
 
-    # Not too many epochs...training CNN's appears to be quite slow.
     model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
 
     for train_idx in range(parameters.retrain_tries):
@@ -210,7 +245,12 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             logger.info(
                 f"Retraining with parameters {parameters}. Training iteration {train_idx+1} of {parameters.retrain_tries}."
             )
-            model.set_weights(my_quant_net.quantized_net.get_weights())
+
+            if parameters.retrain_init == "greedy":
+                model.set_weights(my_quant_net.quantized_net.get_weights())
+            if parameters.retrain_init == "msq":
+                # TODO: Make a MSQ class to handle MSQ networks please.
+                pass
             history = model.fit(
                 X_net_train,
                 y_net_train,
@@ -261,10 +301,9 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     )
     MSQ_loss, MSQ_accuracy = MSQ_model.evaluate(X_test, y_test, verbose=True)
 
-    timestamp = str(pd.Timestamp.now())
-    model_name = model_name = model.__class__.__name__ + timestamp
-
-    # TODO: serialize model
+    model_timestamp = str(pd.Timestamp.now()).replace(" ", "_")
+    model_name = model.__class__.__name__ + str(pd.Timestamp.now()).replace(" ", "_")
+    save_model(model, f"{serialized_model_dir}/{model_name}")
 
     trial_metrics = pd.DataFrame(
         {
@@ -272,21 +311,26 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             "np_seed": parameters.np_seed,
             "tf_seed": parameters.tf_seed,
             "serialized_model": model_name,
-            "trial_idx": parameters.trial_idx,
+            "kernels_per_layer": [parameters.kernels_per_layer],
             "rectifier": parameters.rectifier,
             "kernel_init": parameters.kernel_init.__name__,
-            "kernel_size": parameters.kernel_size,
-            "strides": parameters.stride,
+            "conv_kernel_sizes": [parameters.conv_kernel_sizes],
+            "conv_strides": [parameters.conv_strides],
+            "dropout_rates": [parameters.dropout_rates],
+            "pool_sizes": [parameters.pool_sizes],
+            "pool_strides": [parameters.pool_strides],
             "train_batch_size": parameters.train_batch_size,
             "epochs": parameters.epochs,
             "q_train_size": parameters.q_train_size,
+            "ignore_layers": [parameters.ignore_layers],
             "retrain_tries": parameters.retrain_tries,
+            "retrain_init": parameters.retrain_init,
             "bits": parameters.bits,
             "analog_test_acc": analog_accuracy,
             "sd_test_acc": q_accuracy,
             "msq_test_acc": MSQ_accuracy,
         },
-        index=[timestamp],
+        index=[model_timestamp],
     )
 
     return trial_metrics
@@ -295,7 +339,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
 if __name__ == "__main__":
 
     # Store results in csv file.
-    file_name = data_sets[0] + "_model_metrics_" + str(pd.Timestamp.now())
+    file_name = data_sets[0] + "_model_metrics_" + timestamp
     # Timestamp adds a space. Replace it with _
     file_name = file_name.replace(" ", "_")
     for idx, params in enumerate(param_iterable):
