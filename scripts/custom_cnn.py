@@ -56,7 +56,7 @@ mkdir(serialized_model_dir)
 data_sets = ["mnist"]
 np_seeds = [0]
 tf_seeds = [0]
-kernels_per_layer = [(8, 4), (16, 8)]  # , (32, 16), (64, 32)]
+kernels_per_layer = [(8, 4)]  # , (16, 8) , (32, 16), (64, 32)]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]  # , GlorotNormal, RandomUniform]
 conv_kernel_sizes = [
@@ -67,7 +67,7 @@ conv_strides = [
     (2, 2)
 ]  # Strides assumed to be equal along all dimensions. Tuples indicate shapes per layer.
 dropout_rates = [(0.2, 0.2)]  # , (0.5, 0.5)]
-pool_sizes = [(2, 2), (3, 2)]
+pool_sizes = [(2, 2)]  # , (3, 2)]
 pool_strides = [(2, 2)]
 train_batch_sizes = [128]
 epochs = [1]
