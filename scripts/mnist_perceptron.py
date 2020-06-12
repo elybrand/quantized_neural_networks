@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scipy.stats import mode
 import matplotlib.pyplot as plt
 import logging
 from tensorflow.keras.layers import Dense, BatchNormalization
@@ -15,6 +16,7 @@ from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.optimizers import SGD
 from quantized_network import QuantizedNeuralNetwork
 from sys import stdout
+from itertools import repeat
 
 logging.basicConfig(stream=stdout)
 logger = logging.getLogger(__name__)
@@ -27,9 +29,12 @@ train, test = mnist.load_data()
 
 # Split the training data into two populations. One for training the network and
 # one for training the quantization. For now, split it evenly.
-train_size = train[0].shape[0]
-quant_train_size = int(2 * 128 * 4)
-net_train_size = train_size - quant_train_size
+train_size = train[0].shape[0]  # Total number of samples to use for training.
+quant_train_size = int(
+    3 * 128 * 4
+)  # number of samples to use for training one quantization of a net.
+num_quantize_epochs = 10  # number of different quantizations for a given net to try out (using different data)
+net_train_size = train_size - num_quantize_epochs * quant_train_size
 net_train_idxs = np.random.choice(train_size, size=net_train_size, replace=False)
 quant_train_idxs = list(set(np.arange(train_size)) - set(net_train_idxs))
 
@@ -61,12 +66,8 @@ y_test = to_categorical(y_test, num_classes)
 X_net_train = X_train[net_train_idxs]
 y_net_train = y_train[net_train_idxs]
 
-X_quant_train = X_train[quant_train_idxs]
-y_quant_train = y_train[quant_train_idxs]
-
 # Build perceptron. We will vectorize the images.
 hidden_layer_sizes = [500, 250, 100]
-bits = 4
 activation = "relu"
 kernel_initializer = GlorotUniform()
 model = Sequential()
@@ -107,35 +108,85 @@ history = model.fit(
     validation_split=0.20,
 )
 
-# Now quantize the network.
-get_data = (sample for sample in X_quant_train)
-get_data2 = (sample for sample in X_quant_train)
-# Make it so all data are used.
-batch_size = int(np.floor(quant_train_size / (len(hidden_layer_sizes) + 1)))
-ignore_layers = []  # [num_layers-1]
-is_debug = False
-my_quant_net = QuantizedNeuralNetwork(
-    network=model,
-    batch_size=batch_size,
-    get_data=get_data,
-    logger=logger,
-    ignore_layers=ignore_layers,
-    is_debug=is_debug,
-    order=1,
-    bits=np.log2(5),
-)
-my_quant_net2 = QuantizedNeuralNetwork(
-    network=model,
-    batch_size=batch_size,
-    get_data=get_data2,
-    logger=logger,
-    ignore_layers=ignore_layers,
-    is_debug=is_debug,
-    order=2,
-    bits=np.log2(5),
-)
-my_quant_net.quantize_network()
-my_quant_net2.quantize_network()
+# Keep track of the weights you get from each epoch of quantization
+Q1_list = list(repeat(model.get_weights(), num_quantize_epochs))
+Q2_list = list(repeat(model.get_weights(), num_quantize_epochs))
+for q_epoch in range(num_quantize_epochs):
+    logger.info(f"Quantizing with epoch {q_epoch+1} out of {num_quantize_epochs}")
+    # Select data from the global pool of data available for quantization.
+    # Sample with replacement across each epoch because I'm lazy.
+    q_epoch_idxs = quant_train_idxs[
+        np.random.choice(
+            num_quantize_epochs * quant_train_size, size=quant_train_size, replace=False
+        )
+    ]
+    X_quant_train = X_train[q_epoch_idxs]
+    get_data = (sample for sample in X_quant_train)
+    get_data2 = (sample for sample in X_quant_train)
+    # Make it so all data are used.
+    batch_size = int(np.floor(quant_train_size / (len(hidden_layer_sizes) + 1)))
+    alphabet_scalar = 2
+    ignore_layers = []  # [num_layers-1]
+    is_debug = False
+    bits = np.log2(3)
+    my_quant_net = QuantizedNeuralNetwork(
+        network=model,
+        batch_size=batch_size,
+        get_data=get_data,
+        logger=logger,
+        ignore_layers=ignore_layers,
+        is_debug=is_debug,
+        order=1,
+        bits=bits,
+        alphabet_scalar=alphabet_scalar,
+    )
+    my_quant_net2 = QuantizedNeuralNetwork(
+        network=model,
+        batch_size=batch_size,
+        get_data=get_data2,
+        logger=logger,
+        ignore_layers=ignore_layers,
+        is_debug=is_debug,
+        order=2,
+        bits=bits,
+        alphabet_scalar=alphabet_scalar,
+    )
+
+    my_quant_net.quantize_network()
+    my_quant_net2.quantize_network()
+
+    # These weights are structured by layers in the following way:
+    # Q[epoch][layer_idx][weight_idx]
+    Q1_list[q_epoch] = list(
+        map(lambda layer: layer.get_weights(), my_quant_net.quantized_net.layers)
+    )
+    Q2_list[q_epoch] = list(
+        map(lambda layer: layer.get_weights(), my_quant_net2.quantized_net.layers)
+    )
+
+# Now for each layer that you quantized, and for each weight, take the most frequent atom
+# in the alphabet that appeared for that weight across all quantizations.
+Q1 = list(map(lambda layer: layer.get_weights(), model.layers))
+Q2 = list(map(lambda layer: layer.get_weights(), model.layers))
+for layer_idx, layer in enumerate(model.layers):
+    W = layer.get_weights()[0]
+    if layer.__class__.__name__ in ("Dense", "Conv2D") and layer_idx not in ignore_layers:
+        Q1_candidates = np.zeros((num_quantize_epochs, *W.flatten().shape))
+        Q2_candidates = np.zeros((num_quantize_epochs, *W.flatten().shape))
+        for Q_idx in range(num_quantize_epochs):
+            # Take all the quantized weight matrices, flatten them, stack them as rows in a matrix,
+            # and take the column-wise mode. Reshape and that's your majority vote quantization.
+            Q1_candidates[Q_idx, :] = Q1_list[Q_idx][layer_idx][0].flatten()
+            Q2_candidates[Q_idx, :] = Q2_list[Q_idx][layer_idx][0].flatten()
+        Q1[layer_idx][0] = np.reshape(mode(Q1_candidates, axis=0).mode[0], W.shape)
+        Q2[layer_idx][0] = np.reshape(mode(Q2_candidates, axis=0).mode[0], W.shape)
+
+# Now flatten the list of layer weights to set the quantized weights using set_weights()
+Q1 = [weights for layer_weights in Q1 for weights in layer_weights]
+Q2 = [weights for layer_weights in Q2 for weights in layer_weights]
+
+my_quant_net.quantized_net.set_weights(Q1)
+my_quant_net2.quantized_net.set_weights(Q2)
 
 # Construct SigmaDelta Net
 my_quant_net.quantized_net.compile(

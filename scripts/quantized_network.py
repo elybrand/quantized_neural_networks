@@ -39,6 +39,7 @@ class QuantizedNeuralNetwork:
         ignore_layers=[],
         order=1,
         bits=log2(3),
+        alphabet_scalar=1,
     ):
         """
         CAVEAT: Bias terms are not quantized!
@@ -78,6 +79,8 @@ class QuantizedNeuralNetwork:
         self.quantized_net.set_weights(network.get_weights())
 
         self.batch_size = batch_size
+
+        self.alphabet_scalar = alphabet_scalar
 
         # Create a dictionary encoding which layers are Dense, and what their dimensions are.
         self.layer_dims = {
@@ -160,7 +163,7 @@ class QuantizedNeuralNetwork:
         if norm(X_tilde, 2) < 10 ** (-16):
             return 0
 
-        if abs(dot(X_tilde, u)) < 10 ** (-16):
+        if abs(dot(X_tilde, u)) < 10 ** (-10):
             return self.bit_round(w, rad)
 
         return self.bit_round(dot(X_tilde, u + w * X) / (norm(X_tilde, 2) ** 2), rad)
@@ -347,12 +350,8 @@ class QuantizedNeuralNetwork:
             self.layerwise_directions[layer_idx]["wX"] = wX
             self.layerwise_directions[layer_idx]["qX"] = qX
 
-        # Set the radius of the ternary alphabet.
-        # TODO: FIX THIS
-        # alpha = 1  # This is somewhat arbitrary.
-        # rad = alpha * median(abs(W.flatten()))
-
-        rad = 1
+        # Set the radius of the alphabet.
+        rad = self.alphabet_scalar * median(abs(W.flatten()))
 
         # Now quantize the neurons.
         with ThreadPoolExecutor() as executor:
@@ -527,6 +526,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         logger=None,
         is_debug=False,
         bits=log2(3),
+        alphabet_scalar=1,
     ):
         self.get_data = get_data
 
@@ -547,6 +547,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # This quantifies how many images are used in a given batch to train a layer. This is subtly different
         # than the batch_size for the perceptron case because the actual data here are *patches* of images.
         self.batch_size = batch_size
+
+        self.alphabet_scalar = alphabet_scalar
 
         self.logger = logger
 
@@ -703,9 +705,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             wX = prev_trained_output(batch)[0]
             qX = prev_quant_output(batch)[0]
 
-        # Set the radius of the ternary alphabet.
-        alpha = 1  # This is somewhat arbitrary.
-        rad = alpha * median(abs(W.flatten()))
+        # Set the radius of the alphabet.
+        rad = self.alphabet_scalar * median(abs(W.flatten()))
 
         # Now quantize the neurons.
         with ThreadPoolExecutor() as executor:
