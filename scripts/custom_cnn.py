@@ -56,18 +56,18 @@ mkdir(serialized_model_dir)
 data_sets = ["mnist"]
 np_seeds = [0]
 tf_seeds = [0]
-kernels_per_layer = [(8, 4)]  # , (16, 8), (32, 16), (64, 32)]
+kernels_per_layer = [(8, 4), (16, 8)]  # , (32, 16), (64, 32)]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]  # , GlorotNormal, RandomUniform]
 conv_kernel_sizes = [
-    (2, 2),
+    (3, 3),
     # (3, 2),
 ]  # All kernels assumed to be square. Tuples indicate shapes per layer.
 conv_strides = [
     (2, 2)
 ]  # Strides assumed to be equal along all dimensions. Tuples indicate shapes per layer.
 dropout_rates = [(0.2, 0.2)]  # , (0.5, 0.5)]
-pool_sizes = [(2, 2)]  # , (3, 2)]
+pool_sizes = [(2, 2), (3, 2)]
 pool_strides = [(2, 2)]
 train_batch_sizes = [128]
 epochs = [1]
@@ -176,54 +176,63 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
 
     X_quant_train = X_train[quant_train_idxs]
 
-    # Construct a basic convolutional neural network.
-    model = Sequential()
-    # model.add(Dropout(0.2, input_shape=input_shape))
-    model.add(
-        Conv2D(
-            filters=parameters.kernels_per_layer[0],
-            kernel_size=parameters.conv_kernel_sizes[0],
-            strides=(parameters.conv_strides[0], parameters.conv_strides[0]),
-            activation=parameters.rectifier,
-            kernel_initializer=parameters.kernel_init(),
-            input_shape=input_shape,
+    try:
+        # Construct a basic convolutional neural network.
+        model = Sequential()
+        # model.add(Dropout(0.2, input_shape=input_shape))
+        model.add(
+            Conv2D(
+                filters=parameters.kernels_per_layer[0],
+                kernel_size=parameters.conv_kernel_sizes[0],
+                strides=(parameters.conv_strides[0], parameters.conv_strides[0]),
+                activation=parameters.rectifier,
+                kernel_initializer=parameters.kernel_init(),
+                input_shape=input_shape,
+            )
         )
-    )
 
-    model.add(
-        MaxPooling2D(
-            pool_size=(parameters.pool_sizes[0], parameters.pool_sizes[0]),
-            strides=(parameters.pool_strides[0], parameters.pool_strides[0]),
-            padding="valid",
+        model.add(
+            MaxPooling2D(
+                pool_size=(parameters.pool_sizes[0], parameters.pool_sizes[0]),
+                strides=(parameters.pool_strides[0], parameters.pool_strides[0]),
+                padding="valid",
+            )
         )
-    )
 
-    model.add(BatchNormalization())
-    model.add(Dropout(parameters.dropout_rates[0]))
-    model.add(
-        Conv2D(
-            filters=parameters.kernels_per_layer[1],
-            kernel_size=parameters.conv_kernel_sizes[1],
-            strides=(parameters.conv_strides[1], parameters.conv_strides[1]),
-            kernel_initializer=parameters.kernel_init(),
-            activation=parameters.rectifier,
+        model.add(BatchNormalization())
+        model.add(Dropout(parameters.dropout_rates[0]))
+        model.add(
+            Conv2D(
+                filters=parameters.kernels_per_layer[1],
+                kernel_size=parameters.conv_kernel_sizes[1],
+                strides=(parameters.conv_strides[1], parameters.conv_strides[1]),
+                kernel_initializer=parameters.kernel_init(),
+                activation=parameters.rectifier,
+            )
         )
-    )
 
-    model.add(
-        MaxPooling2D(
-            pool_size=(parameters.pool_sizes[1], parameters.pool_sizes[1]),
-            strides=(parameters.pool_strides[1], parameters.pool_strides[1]),
-            padding="valid",
+        model.add(
+            MaxPooling2D(
+                pool_size=(parameters.pool_sizes[1], parameters.pool_sizes[1]),
+                strides=(parameters.pool_strides[1], parameters.pool_strides[1]),
+                padding="valid",
+            )
         )
-    )
 
-    model.add(BatchNormalization())
-    model.add(Flatten())
-    model.add(Dropout(parameters.dropout_rates[1]))
-    model.add(Dense(10, activation="softmax"))
+        model.add(BatchNormalization())
+        model.add(Flatten())
+        model.add(Dropout(parameters.dropout_rates[1]))
+        model.add(Dense(10, activation="softmax"))
 
-    model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+        model.compile(
+            optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"]
+        )
+    except ValueError:
+        # Inconsistent paramter configuration.
+        logger.warning(
+            "Inconsistent parameter configuration. Skipping to next parameter configuration."
+        )
+        return
 
     for train_idx in range(parameters.retrain_tries):
 
@@ -344,6 +353,11 @@ if __name__ == "__main__":
     file_name = file_name.replace(" ", "_")
     for idx, params in enumerate(param_iterable):
         trial_metrics = train_network(params)
+
+        if trial_metrics is None:
+            # Skip this configuration. It's inconsistent.
+            continue
+
         if idx == 0:
             # add the header
             trial_metrics.to_csv(f"../model_metrics/{file_name}.csv", mode="a")
