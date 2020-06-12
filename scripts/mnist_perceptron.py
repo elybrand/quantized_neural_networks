@@ -30,11 +30,12 @@ train, test = mnist.load_data()
 # Split the training data into two populations. One for training the network and
 # one for training the quantization. For now, split it evenly.
 train_size = train[0].shape[0]  # Total number of samples to use for training.
+global_quant_train_size = int(0.5 * train_size)
 quant_train_size = int(
-    3 * 128 * 4
+    2 * 500 * 4
 )  # number of samples to use for training one quantization of a net.
-num_quantize_epochs = 10  # number of different quantizations for a given net to try out (using different data)
-net_train_size = train_size - num_quantize_epochs * quant_train_size
+num_quantize_epochs = 50  # number of different quantizations for a given net to try out (using different data)
+net_train_size = train_size - global_quant_train_size
 net_train_idxs = np.random.choice(train_size, size=net_train_size, replace=False)
 quant_train_idxs = list(set(np.arange(train_size)) - set(net_train_idxs))
 
@@ -115,9 +116,10 @@ for q_epoch in range(num_quantize_epochs):
     logger.info(f"Quantizing with epoch {q_epoch+1} out of {num_quantize_epochs}")
     # Select data from the global pool of data available for quantization.
     # Sample with replacement across each epoch because I'm lazy.
-    q_epoch_idxs = quant_train_idxs[
-        np.random.choice(
-            num_quantize_epochs * quant_train_size, size=quant_train_size, replace=False
+    q_epoch_idxs = [
+        quant_train_idxs[i]
+        for i in np.random.choice(
+            global_quant_train_size, size=quant_train_size, replace=False
         )
     ]
     X_quant_train = X_train[q_epoch_idxs]
