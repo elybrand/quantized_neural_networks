@@ -10,7 +10,7 @@ from tensorflow.keras.layers import (
     Conv2D,
     MaxPooling2D,
     Flatten,
-    Dropout
+    Dropout,
 )
 from tensorflow.keras.initializers import (
     RandomNormal,
@@ -41,16 +41,29 @@ tf_seed = 0
 set_seed(tf_seed)
 np.random.seed(np_seed)
 
+
+# Output shape of conv2d layer is
+# np.floor((height - kernel_height + padding + stride)/stride) x ...
+
+# Output shape of max pooling with padding 'valid' (i.e. no padding)
+# np.floor((input_shape - pool_size + 1)/strides)
+# Otherwise, with padding it's
+# np.floor(input_shape/strides)
+
+# This parameter grid assumes the following network topology:
+# Conv2D -> MaxPooling2D -> BatchNormalization -> Dropout -> Conv2D -> MaxPooling2D -> BatchNormalization -> Dropout -> Dense
+
+
 # Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
 data_sets = ["mnist"]
 trial_idxs = [0]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]
-kernel_sizes = [4]
+kernel_sizes = [3]
 strides = [2]
 train_batch_sizes = [128]
-epochs = [3]
-q_train_sizes = [10**4]
+epochs = [10]
+q_train_sizes = [10 ** 4]
 ignore_layers = [[]]
 retrain_tries = [1]
 bits = [np.log2(i) for i in range(3, 4)]
@@ -141,7 +154,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
 
     # Construct a basic convolutional neural network.
     model = Sequential()
-    model.add(Dropout(0.2, input_shape=input_shape))
+    # model.add(Dropout(0.2, input_shape=input_shape))
     model.add(
         Conv2D(
             filters=64,
@@ -149,11 +162,11 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             strides=(parameters.stride, parameters.stride),
             activation=parameters.rectifier,
             kernel_initializer=parameters.kernel_init(),
-            # input_shape=input_shape,
+            input_shape=input_shape,
         )
     )
 
-    model.add(MaxPooling2D(pool_size=(2,2), strides=(2,2), padding='valid'))
+    model.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2), padding="valid"))
 
     model.add(BatchNormalization())
     model.add(Dropout(0.2, input_shape=input_shape))
@@ -167,7 +180,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         )
     )
 
-    model.add(MaxPooling2D(pool_size=(2,2), strides=(2,2), padding='valid'))
+    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"))
 
     model.add(BatchNormalization())
     model.add(Flatten())
@@ -211,14 +224,12 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         get_data = (sample for sample in X_quant_train)
         # Make it so all data are used.
         batch_size = int(np.floor(quant_train_size / (3)))
-        is_debug = False
         # TODO: add ignore layer sometime in the future.
         my_quant_net = QuantizedCNN(
             network=model,
             batch_size=batch_size,
             get_data=get_data,
             logger=logger,
-            is_debug=is_debug,
             bits=parameters.bits,
         )
         my_quant_net.quantize_network()
@@ -285,6 +296,8 @@ if __name__ == "__main__":
 
     # Store results in csv file.
     file_name = data_sets[0] + "_model_metrics_" + str(pd.Timestamp.now())
+    # Timestamp adds a space. Replace it with _
+    file_name = file_name.replace(" ", "_")
     for idx, params in enumerate(param_iterable):
         trial_metrics = train_network(params)
         if idx == 0:
