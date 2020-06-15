@@ -53,29 +53,33 @@ serialized_model_dir = f"../serialized_models/experiment_{timestamp}".replace(" 
 mkdir(serialized_model_dir)
 
 # Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
+
+#TODO: Cross validate over the alphabet scalar!!
+
 data_sets = ["mnist"]
-np_seeds = [0]
-tf_seeds = [0]
-kernels_per_layer = [(8, 4)]  # , (16, 8) , (32, 16), (64, 32)]
+np_seeds = [0, 1]#, 2]
+tf_seeds = [0, 1]#, 2]
+kernels_per_layer = [(16, 8) , (32, 16), (64, 32)]
 rectifiers = ["relu"]
-kernel_inits = [GlorotUniform]  # , GlorotNormal, RandomUniform]
+kernel_inits = [GlorotUniform, GlorotNormal]
 conv_kernel_sizes = [
-    (3, 3),
-    # (3, 2),
+    # (5, 4),
+    (4, 3),
+    #(3, 2),
 ]  # All kernels assumed to be square. Tuples indicate shapes per layer.
 conv_strides = [
     (2, 2)
 ]  # Strides assumed to be equal along all dimensions. Tuples indicate shapes per layer.
-dropout_rates = [(0.2, 0.2)]  # , (0.5, 0.5)]
-pool_sizes = [(2, 2)]  # , (3, 2)]
+dropout_rates = [(0.2, 0.2), (0.35, 0.35), (0.5, 0.5)]
+pool_sizes = [(4, 2), (3, 2), (2,2)]
 pool_strides = [(2, 2)]
 train_batch_sizes = [128]
-epochs = [1]
+epochs = [10]
 q_train_sizes = [10 ** 4]
 ignore_layers = [[]]
-retrain_tries = [1]
+retrain_tries = [1, 2]#, 4]
 retrain_init = ["greedy"]
-bits = [np.log2(3)]  # for i in  (3, 8, 16)]
+bits = [np.log2(i) for i in  (3, 16, 32)]
 
 parameter_grid = product(
     data_sets,
