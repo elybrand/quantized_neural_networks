@@ -298,11 +298,6 @@ class QuantizedNeuralNetwork:
             wX = prev_trained_output([wBatch])[0]
             qX = prev_quant_output([qBatch])[0]
 
-        # If you're debugging, log wX and qX.
-        if self.is_debug:
-            self.layerwise_directions[layer_idx]["wX"] = wX
-            self.layerwise_directions[layer_idx]["qX"] = qX
-
         # Set the radius of the alphabet.
         rad = self.alphabet_scalar * median(abs(W.flatten()))
 
@@ -323,24 +318,6 @@ class QuantizedNeuralNetwork:
             self.quantized_net.layers[layer_idx].set_weights([Q, bias])
         else:
             self.quantized_net.layers[layer_idx].set_weights([Q])
-
-        # Log the relative errors in the data incurred by quantizing this layer.
-        this_layer_trained_output = Kfunction(
-            [self.trained_net.layers[layer_idx].input],
-            [self.trained_net.layers[layer_idx].output],
-        )
-        this_layer_quant_output = Kfunction(
-            [self.quantized_net.layers[layer_idx].input],
-            [self.quantized_net.layers[layer_idx].output],
-        )
-        new_wX = this_layer_trained_output([wX])[0]
-        new_qX = this_layer_quant_output([qX])[0]
-        self.layerwise_rel_errs[layer_idx] = [
-            norm(new_wX[:, t] - new_qX[:, t]) / norm(new_wX[:, t])
-            if norm(new_wX[:, t]) > 10 ** -8
-            else nan
-            for t in range(N_ell_plus_1)
-        ]
 
     def quantize_network(self):
 
