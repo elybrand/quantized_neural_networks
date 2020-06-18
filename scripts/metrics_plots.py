@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 %matplotlib osx
 
-df = pd.read_csv('../model_metrics/mnist_model_metrics_2020-06-09 17:06:17.803421.csv')
+df = pd.read_csv('../model_metrics/mnist_model_metrics_2020-06-15_16:51:23.839830.csv')
 
 # Select the parameter you wish to track.
 grp = df.groupby(by='kernel_size')

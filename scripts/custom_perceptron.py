@@ -55,18 +55,18 @@ mkdir(serialized_model_dir)
 #TODO: Cross validate over the alphabet scalar!!
 
 data_sets = ["mnist"]
-np_seeds = [0]
-tf_seeds = [0]
-layer_widths = [(20,)]
+np_seeds = [0, 1]
+tf_seeds = [0, 1]
+layer_widths = [(800,), (1000,), (500,300)]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]
 train_batch_sizes = [128]
-epochs = [1]
+epochs = [20]
 ignore_layers = [[]]
 retrain_tries = [1]
 retrain_init = ["greedy"]
 bits = [np.log2(i) for i in  (3,)]
-alphabet_scalars = [1]
+alphabet_scalars = np.arange(1,4.5, 1)
 
 parameter_grid = product(
     data_sets,
@@ -310,6 +310,9 @@ if __name__ == "__main__":
     file_name = data_sets[0] + "_model_metrics_" + timestamp
     # Timestamp adds a space. Replace it with _
     file_name = file_name.replace(" ", "_")
+
+    
+    
     for idx, params in enumerate(param_iterable):
         trial_metrics = train_network(params)
 
