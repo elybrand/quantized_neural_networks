@@ -9,6 +9,7 @@ from numpy import (
     linspace,
     argmin,
     abs,
+    delete,
 )
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
@@ -25,6 +26,7 @@ QuantizedFilter = namedtuple(
     "QuantizedFilter", ["layer_idx", "filter_idx", "channel_idx", "q_filtr", "U"]
 )
 SegmentedData = namedtuple("SegmentedData", ["wX_seg", "qX_seg"])
+GreedyDirections = namedtuple("GreedyDirection", ["dir_idx", "w", "wX", "qX"])
 
 
 class QuantizedNeuralNetwork:
@@ -209,32 +211,6 @@ class QuantizedNeuralNetwork:
         qNeuron = QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
         return qNeuron
 
-    # # Second order Sigma Delta
-    # def quantize_neuron2(self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1) -> QuantizedNeuron:
-
-    #   N_ell = wX.shape[1]
-    #   u_init = zeros(self.batch_size)
-    #   w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
-    #   q = zeros(N_ell)
-    #   U = zeros((N_ell, self.batch_size))
-
-    #   # One step of MSQ
-    #   q[0] = self.quantize_weight(w[0], u_init, wX[:,0], qX[:,0], rad)
-    #   U[0,:] = u_init + w[0]*wX[:,0] - q[0]*qX[:,0]
-
-    #   # One step of first order Sigma Delta
-    #   q[1] = self.quantize_weight2(w[0], U[0,:], u_init, wX[:,1], qX[:,1], rad)
-    #   U[1,:] = 2*U[0,:] - u_init + w[1]*wX[:,1] - q[1] * qX[:,1]
-
-    #   # Steps of second order.
-    #   for t in range(1,N_ell):
-    #       q[t] = self.quantize_weight2(w[t], U[t-1,:], U[t-2,:], wX[:,t], qX[:,t], rad)
-    #       U[t,:] = 2*U[t-1,:] - U[t-2,:] + w[t]*wX[:,t] - q[t]*qX[:,t]
-
-    #   qNeuron = QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
-
-    #   return qNeuron
-
     def quantize_neuron(
         self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1
     ) -> QuantizedNeuron:
@@ -251,11 +227,89 @@ class QuantizedNeuralNetwork:
             q[t] = self.quantize_weight(w[t], U[t - 1, :], wX[:, t], qX[:, t], rad)
             U[t, :] = U[t - 1, :] + w[t] * wX[:, t] - q[t] * qX[:, t]
 
-        qNeuron = QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
+        return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
 
-        return qNeuron
+    def select_next_directions(self, w: array, u: array, wX: array, qX: array):
 
-    def quantize_layer(self, layer_idx: int, order: int):
+        N = wX.shape[1]
+        # Compute all possible dither terms in the quantizer, and take the set of directions which maximizes it.
+        inner_prods = [
+            dot(qX[:, t] / norm(qX[:, t], 2) ** 2, u + w[t] * (wX[:, t] - qX[:, t]))
+            if norm(qX[:, t], 2) > 10 ** (-16)
+            else 0
+            for t in range(N)
+        ]
+        max_inner_prod = max(inner_prods)
+        # If there is more than one pair of directions which maximizes the dither, take the first one.
+        max_dir_idx = [t for t in range(N) if inner_prods[t] == max_inner_prod][0]
+
+        return GreedyDirections(
+            dir_idx=max_dir_idx,
+            w=delete(w, max_dir_idx),
+            wX=delete(wX, max_dir_idx, axis=1),
+            qX=delete(qX, max_dir_idx, axis=1),
+        )
+
+    def quantize_neuron_greedy(
+        self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1
+    ) -> QuantizedNeuron:
+        """
+        At each time step, select the next directions which maximize the dither.
+        """
+        N_ell = wX.shape[1]
+        u_init = zeros(self.batch_size)
+        w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
+        q = zeros(N_ell)
+        U = zeros((N_ell, self.batch_size))
+
+        # TODO: select column at random?
+        q[0] = self.quantize_weight(w[0], u_init, wX[:, 0], qX[:, 0], rad)
+        U[0, :] = u_init + w[0] * wX[:, 0] - q[0] * qX[:, 0]
+
+        # Remove the first directions from future choices of directions.
+        wX = delete(wX, 0, axis=1)
+        qX = delete(qX, 0, axis=1)
+        w = delete(w, 0)
+
+        for t in range(1, N_ell):
+            greedy_dir = self.select_next_directions(w, U[t - 1, :], wX, qX)
+            idx = greedy_dir.dir_idx
+            q[idx] = self.quantize_weight(
+                w[idx], U[t - 1, :], wX[:, idx], qX[:, idx], rad
+            )
+            U[t, :] = U[t - 1, :] + w[idx] * wX[:, idx] - q[idx] * qX[:, idx]
+
+            # Update list of future directions to choose from.
+            w = greedy_dir.w
+            wX = greedy_dir.wX
+            qX = greedy_dir.qX
+
+        return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
+
+    def sort_directions(self, wX: array, qX: array):
+        # Sort directions so that each step maximizes the absolute dot product of the previous step.
+        # only look at wX directions for now.
+
+        # Compute all pairwise inner products once and for all so we can quick reference later.
+        gramian = wX.T @ wX
+        new_wX = np.zeros(wX.shape)
+
+        # Start with the first one for now.
+        new_wX[:, 0] = wX[:, 0]
+        prev_dir_idx = 0
+        # Keep track of the directions you've chosen so far.
+        idx_sequence = {prev_dir_idx}
+        for t in range(1, new_wX.shape[1]):
+            # Select the relevant row from the gramian.
+            # look at absolute dot products.
+            inner_prods = abs(gramian[prev_dir_idx, :])
+            # Remove those indices which have already been used.
+            inner_prods = [x for i, x in enumerate(inner_prods) if i not in idx_sequence]
+
+        # TODO: Finish!
+        return
+
+    def quantize_layer(self, layer_idx: int, order: int, use_greedy: bool):
 
         W = self.trained_net.layers[layer_idx].get_weights()[0]
         N_ell, N_ell_plus_1 = W.shape
@@ -306,6 +360,8 @@ class QuantizedNeuralNetwork:
                 qNeuron = self.quantize_neuron(layer_idx, neuron_idx, wX, qX, rad)
             else:
                 qNeuron = self.quantize_neuron2(layer_idx, neuron_idx, wX, qX, rad)
+            if use_greedy:
+                qNeuron = self.quantize_neuron_greedy(layer_idx, neuron_idx, wX, qX, rad)
             Q[:, neuron_idx] = qNeuron.q
             if self.logger:
                 self.logger.info(
@@ -319,7 +375,7 @@ class QuantizedNeuralNetwork:
         else:
             self.quantized_net.layers[layer_idx].set_weights([Q])
 
-    def quantize_network(self):
+    def quantize_network(self, use_greedy=False):
 
         # This must be done sequentially.
         for layer_idx, layer in enumerate(self.trained_net.layers):
@@ -330,7 +386,7 @@ class QuantizedNeuralNetwork:
                 # Only quantize dense layers.
                 if self.logger:
                     self.logger.info(f"Quantizing layer {layer_idx}...")
-                self.quantize_layer(layer_idx, self.order)
+                self.quantize_layer(layer_idx, self.order, use_greedy=use_greedy)
 
 
 class QuantizedCNN(QuantizedNeuralNetwork):
