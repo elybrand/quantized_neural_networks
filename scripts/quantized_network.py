@@ -47,9 +47,6 @@ class QuantizedNeuralNetwork:
         CAVEAT: Bias terms are not quantized!
         REMEMBER: TensorFlow flips everything for you. Networks act via
 
-        # TODO: add verbose flag, progress bar
-        # TODO: one speedup is to try transposing all the wX, qX's. Accessing columns is more expensive than accessing rows.
-
         batch_size x N_ell     N_ell x N_{ell+1}
 
         [ -- X_1^T -- ]     [  |     |       |  ]
@@ -116,8 +113,6 @@ class QuantizedNeuralNetwork:
     ) -> float:
         # This is undefined if X_tilde is zero. In this case, return 0.
 
-        # breakpoint()
-
         if norm(X_tilde, 2) < 10 ** (-16):
             return 0
 
@@ -125,13 +120,6 @@ class QuantizedNeuralNetwork:
             return self.bit_round(w, rad)
 
         return self.bit_round(dot(X_tilde, u + w * X) / (norm(X_tilde, 2) ** 2), rad)
-
-    # # This is for second order sigma delta only.
-    # def quantize_weight2(self, w: float, u1: array, u2: array, X: array, X_tilde: array, rad: float) -> float:
-    #   if norm(X_tilde,2) < 10**(-16):
-    #       return 0
-
-    #   return self.bit_round(dot(X_tilde, 2*u1 - u2 + w*X)/norm(X_tilde,2)**2, rad)
 
     # One-two step
     def quantize_neuron2(
@@ -152,7 +140,6 @@ class QuantizedNeuralNetwork:
         U2 = zeros(self.batch_size)
 
         # Two first order steps.
-        # breakpoint()
         q11 = self.quantize_weight(w[0], u_init, wX[:, 0], qX[:, 0], rad)
         U1[0, :] = u_init + w[0] * wX[:, 0] - q11 * qX[:, 0]
         q12 = self.quantize_weight(w[1], U1[0, :], wX[:, 1], qX[:, 1], rad)
@@ -242,69 +229,11 @@ class QuantizedNeuralNetwork:
 
         return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
 
-    def select_next_directions(self, w: array, u: array, wX: array, qX: array):
-
-        N = wX.shape[1]
-        # Compute all possible dither terms in the quantizer, and take the set of directions which maximizes it.
-        inner_prods = [
-            dot(qX[:, t] / norm(qX[:, t], 2) ** 2, u + w[t] * (wX[:, t] - qX[:, t]))
-            if norm(qX[:, t], 2) > 10 ** (-16)
-            else 0
-            for t in range(N)
-        ]
-        max_inner_prod = max(inner_prods)
-        # If there is more than one pair of directions which maximizes the dither, take the first one.
-        max_dir_idx = [t for t in range(N) if inner_prods[t] == max_inner_prod][0]
-
-        return GreedyDirections(
-            dir_idx=max_dir_idx,
-            w=delete(w, max_dir_idx),
-            wX=delete(wX, max_dir_idx, axis=1),
-            qX=delete(qX, max_dir_idx, axis=1),
-        )
-
-    def quantize_neuron_greedy(
-        self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1
-    ) -> QuantizedNeuron:
-        """
-        At each time step, select the next directions which maximize the dither.
-        """
-        N_ell = wX.shape[1]
-        u_init = zeros(self.batch_size)
-        w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
-        q = zeros(N_ell)
-        U = zeros((N_ell, self.batch_size))
-
-        # TODO: select column at random?
-        q[0] = self.quantize_weight(w[0], u_init, wX[:, 0], qX[:, 0], rad)
-        U[0, :] = u_init + w[0] * wX[:, 0] - q[0] * qX[:, 0]
-
-        # Remove the first directions from future choices of directions.
-        wX = delete(wX, 0, axis=1)
-        qX = delete(qX, 0, axis=1)
-        w = delete(w, 0)
-
-        for t in range(1, N_ell):
-            greedy_dir = self.select_next_directions(w, U[t - 1, :], wX, qX)
-            idx = greedy_dir.dir_idx
-            q[idx] = self.quantize_weight(
-                w[idx], U[t - 1, :], wX[:, idx], qX[:, idx], rad
-            )
-            U[t, :] = U[t - 1, :] + w[idx] * wX[:, idx] - q[idx] * qX[:, idx]
-
-            # Update list of future directions to choose from.
-            w = greedy_dir.w
-            wX = greedy_dir.wX
-            qX = greedy_dir.qX
-
-        return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
-
     def sort_directions(self, wX: array, qX: array):
         # Sort directions so that each step maximizes the absolute correlation between the chosen step
         # and the previous step.
 
         # Normalize all of the columns of wX for comparison.
-        # breakpoint()
         wX_unit = array(
             [
                 row / norm(row) if norm(row) > 10 ** (-16) else zeros(row.shape)
@@ -322,7 +251,6 @@ class QuantizedNeuralNetwork:
         new_qX[:, 0] = qX[:, 0]
         # Keep track of the directions you've chosen so far.
         used_idxs = [0]
-        # breakpoint()
         for t in range(1, new_wX.shape[1]):
             # Select the relevant row from the gramian.
             # look at absolute dot products.
@@ -387,8 +315,6 @@ class QuantizedNeuralNetwork:
 
         # Set the radius of the alphabet.
         rad = self.alphabet_scalar * median(abs(W.flatten()))
-
-        # TODO: change all operations in quantize_neuron so that it accesses rows.
 
         # Sort all directions beforehand.
         if use_greedy:

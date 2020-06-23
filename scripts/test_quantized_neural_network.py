@@ -24,35 +24,17 @@ def adversarial_ortho_walk():
     return RandomWalk(w=w, X=X)
 
 
-def test_select_next_directions(adversarial_ortho_walk):
-
-    # w, X = adversarial_ortho_walk.w, adversarial_ortho_walk.X
-    w = np.array([[0.5], [0.5], [0.5]])
-    X = np.array([[1, 0, 0], [0, 1, 0], [1, 0, 0], [0, 1, 0], [1, 0, 0], [0, 1, 0]]).T
-
-    # in R2, try using unit vectors along the unit circle. Fix a permutation to shuffle them.
-    # Sort, and make sure you get the permutation back.
-
-    model = Sequential()
-    model.add(Dense(1, activation=None, use_bias=False, input_dim=3))
-    model.layers[0].set_weights([w])
-    qnet = QuantizedNeuralNetwork(network=model, batch_size=None, get_data=None,)
-    sdirs = qnet.sort_directions(wX=X, qX=X)
-    u = X[:, 0]
-    qnet.select_next_directions(w, u, X[:, 1:], X[:, 1:])
-
-
 def test_sort_directions():
 
     w = np.array([[0.1], [0.2], [0.3], [0.4]])
     X = np.array([[1, 0], [1, 0], [0, 1], [0, 1]]).T
 
-    perm = (2, 0, 3, 1)
+    perm = (0, 2, 1, 3)
     w_perm = np.array([w[idx] for idx in perm])
     X_perm = np.array([X.T[idx, :] for idx in perm]).T
 
     batch_size = 2
-    get_data = (sample for sample in X)
+    get_data = (sample for sample in X_perm)
 
     model = Sequential()
     model.add(Dense(1, activation=None, use_bias=False, input_dim=4))
@@ -60,4 +42,6 @@ def test_sort_directions():
     qnet = QuantizedNeuralNetwork(
         network=model, batch_size=batch_size, get_data=get_data,
     )
-    qnet.quantize_network()
+    sdirs = qnet.sort_directions(wX=X_perm, qX=X_perm)
+    qnet.quantize_network(use_greedy=True)
+    qnet.quantized_net.layers[0].get_weights()
