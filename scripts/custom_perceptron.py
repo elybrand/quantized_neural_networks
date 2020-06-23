@@ -52,21 +52,23 @@ mkdir(serialized_model_dir)
 
 # Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
 
-#TODO: Cross validate over the alphabet scalar!!
+# TODO: fix quant_train_size
+
+quant_train_size = 60000
 
 data_sets = ["mnist"]
-np_seeds = [0, 1]
-tf_seeds = [0, 1]
-layer_widths = [(800,), (1000,), (500,300)]
+np_seeds = [0]
+tf_seeds = [0]
+layer_widths = [(5,)]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]
 train_batch_sizes = [128]
-epochs = [20]
-ignore_layers = [[]]
+epochs = [1]
+ignore_layers = [[2]]
 retrain_tries = [1]
 retrain_init = ["greedy"]
-bits = [np.log2(i) for i in  (3,)]
-alphabet_scalars = np.arange(1,4.5, 1)
+bits = [np.log2(i) for i in (3,)]
+alphabet_scalars = [2]
 
 parameter_grid = product(
     data_sets,
@@ -231,12 +233,12 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
                 verbose=True,
                 validation_split=0.20,
             )
-        get_data = (sample for sample in X_train)
-        for i in range(len(parameters.layer_widths)+1):
+        get_data = (sample for sample in X_train[0:quant_train_size])
+        for i in range(len(parameters.layer_widths) + 1):
             # Chain together iterators over the entire training set. This is so each layer uses
             # the entire training data.
-            get_data = chain(get_data, (sample for sample in X_train))
-        batch_size = X_train.shape[0]
+            get_data = chain(get_data, (sample for sample in X_train[0:quant_train_size]))
+        batch_size = quant_train_size
         my_quant_net = QuantizedNeuralNetwork(
             network=model,
             batch_size=batch_size,
@@ -244,8 +246,11 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             logger=logger,
             bits=parameters.bits,
             alphabet_scalar=parameters.alphabet_scalar,
+            ignore_layers=parameters.ignore_layers,
         )
-        my_quant_net.quantize_network()
+
+        # TODO: remove later
+        my_quant_net.quantize_network(use_greedy=True)
 
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
@@ -311,8 +316,6 @@ if __name__ == "__main__":
     # Timestamp adds a space. Replace it with _
     file_name = file_name.replace(" ", "_")
 
-    
-    
     for idx, params in enumerate(param_iterable):
         trial_metrics = train_network(params)
 
