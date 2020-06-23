@@ -10,6 +10,7 @@ from numpy import (
     argmin,
     abs,
     delete,
+    inf,
 )
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
@@ -27,6 +28,7 @@ QuantizedFilter = namedtuple(
 )
 SegmentedData = namedtuple("SegmentedData", ["wX_seg", "qX_seg"])
 GreedyDirections = namedtuple("GreedyDirection", ["dir_idx", "w", "wX", "qX"])
+SortedDirections = namedtuple("SortedDirections", ["wX", "qX", "permutation"])
 
 
 class QuantizedNeuralNetwork:
@@ -46,6 +48,7 @@ class QuantizedNeuralNetwork:
         REMEMBER: TensorFlow flips everything for you. Networks act via
 
         # TODO: add verbose flag, progress bar
+        # TODO: one speedup is to try transposing all the wX, qX's. Accessing columns is more expensive than accessing rows.
 
         batch_size x N_ell     N_ell x N_{ell+1}
 
@@ -212,12 +215,22 @@ class QuantizedNeuralNetwork:
         return qNeuron
 
     def quantize_neuron(
-        self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1
+        self,
+        layer_idx: int,
+        neuron_idx: int,
+        wX: array,
+        qX: array,
+        rad=1,
+        permutation=None,
     ) -> QuantizedNeuron:
 
         N_ell = wX.shape[1]
         u_init = zeros(self.batch_size)
         w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
+        if permutation is not None:
+            if self.logger:
+                self.logger.info("\tPermuting weights...")
+            w = [w[idx] for idx in permutation]
         q = zeros(N_ell)
         U = zeros((N_ell, self.batch_size))
         # Take columns of the data matrix, since the samples are given via the rows.
@@ -287,27 +300,47 @@ class QuantizedNeuralNetwork:
         return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
 
     def sort_directions(self, wX: array, qX: array):
-        # Sort directions so that each step maximizes the absolute dot product of the previous step.
-        # only look at wX directions for now.
+        # Sort directions so that each step maximizes the absolute correlation between the chosen step
+        # and the previous step.
 
-        # Compute all pairwise inner products once and for all so we can quick reference later.
-        gramian = wX.T @ wX
-        new_wX = np.zeros(wX.shape)
+        # Normalize all of the columns of wX for comparison.
+        # breakpoint()
+        wX_unit = array(
+            [
+                row / norm(row) if norm(row) > 10 ** (-16) else zeros(row.shape)
+                for row in wX.T
+            ]
+        ).T
+
+        # Compute all absolute correlations once and for all so we can quick reference later.
+        gramian = abs(wX_unit.T @ wX_unit)
+        new_wX = zeros(wX.shape)
+        new_qX = zeros(qX.shape)
 
         # Start with the first one for now.
         new_wX[:, 0] = wX[:, 0]
-        prev_dir_idx = 0
+        new_qX[:, 0] = qX[:, 0]
         # Keep track of the directions you've chosen so far.
-        idx_sequence = {prev_dir_idx}
+        used_idxs = [0]
+        # breakpoint()
         for t in range(1, new_wX.shape[1]):
             # Select the relevant row from the gramian.
             # look at absolute dot products.
-            inner_prods = abs(gramian[prev_dir_idx, :])
+            inner_prods = gramian[used_idxs[-1], :]
             # Remove those indices which have already been used.
-            inner_prods = [x for i, x in enumerate(inner_prods) if i not in idx_sequence]
+            inner_prods = array(
+                [[i, x] for i, x in enumerate(inner_prods) if i not in used_idxs]
+            )
+            # Find the index of the vector which maximizes the absolute correlation.
+            # Add that direction to new_wX and update the list of used_idxs.
+            max_inner_prod = max(inner_prods[:, 1])
+            next_dir_idx = int([i for (i, x) in inner_prods if x == max_inner_prod][0])
 
-        # TODO: Finish!
-        return
+            new_wX[:, t] = wX[:, next_dir_idx]
+            new_qX[:, t] = qX[:, next_dir_idx]
+            used_idxs += [next_dir_idx]
+
+        return SortedDirections(wX=new_wX, qX=new_qX, permutation=tuple(used_idxs))
 
     def quantize_layer(self, layer_idx: int, order: int, use_greedy: bool):
 
@@ -355,14 +388,37 @@ class QuantizedNeuralNetwork:
         # Set the radius of the alphabet.
         rad = self.alphabet_scalar * median(abs(W.flatten()))
 
+        # TODO: change all operations in quantize_neuron so that it accesses rows.
+
+        # Sort all directions beforehand.
+        if use_greedy:
+            sorted_dirs = self.sort_directions(wX, qX)
+
         for neuron_idx in range(N_ell_plus_1):
-            if order == 1:
+            if order == 1 and not use_greedy:
                 qNeuron = self.quantize_neuron(layer_idx, neuron_idx, wX, qX, rad)
-            else:
+                Q[:, neuron_idx] = qNeuron.q
+            if order == 2 and not use_greedy:
                 qNeuron = self.quantize_neuron2(layer_idx, neuron_idx, wX, qX, rad)
+                Q[:, neuron_idx] = qNeuron.q
             if use_greedy:
-                qNeuron = self.quantize_neuron_greedy(layer_idx, neuron_idx, wX, qX, rad)
-            Q[:, neuron_idx] = qNeuron.q
+
+                w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
+                new_w = [w[idx] for idx in sorted_dirs.permutation]
+
+                qNeuron = self.quantize_neuron(
+                    layer_idx,
+                    neuron_idx,
+                    sorted_dirs.wX,
+                    sorted_dirs.qX,
+                    rad,
+                    permutation=sorted_dirs.permutation,
+                )
+                # Permute the bit string to what it should be.
+                Q[:, neuron_idx] = array(
+                    [qNeuron.q[idx] for idx in sorted_dirs.permutation]
+                )
+
             if self.logger:
                 self.logger.info(
                     f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}"

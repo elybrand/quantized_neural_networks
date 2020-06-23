@@ -26,11 +26,18 @@ def adversarial_ortho_walk():
 
 def test_select_next_directions(adversarial_ortho_walk):
 
-    w, X = adversarial_ortho_walk.w, adversarial_ortho_walk.X
-    # model = Sequential()
-    # model.add(Dense(1, activation=None, use_bias=False, input_dim=(3,)))
-    # model.layers[0].set_weights([w])
-    qnet = QuantizedNeuralnetwork(network=None, batch_size=None, get_data=None,)
+    # w, X = adversarial_ortho_walk.w, adversarial_ortho_walk.X
+    w = np.array([[0.5], [0.5], [0.5]])
+    X = np.array([[1, 0, 0], [0, 1, 0], [1, 0, 0], [0, 1, 0], [1, 0, 0], [0, 1, 0]]).T
+
+    # in R2, try using unit vectors along the unit circle. Fix a permutation to shuffle them.
+    # Sort, and make sure you get the permutation back.
+
+    model = Sequential()
+    model.add(Dense(1, activation=None, use_bias=False, input_dim=3))
+    model.layers[0].set_weights([w])
+    qnet = QuantizedNeuralNetwork(network=model, batch_size=None, get_data=None,)
+    sdirs = qnet.sort_directions(wX=X, qX=X)
     u = X[:, 0]
     qnet.select_next_directions(w, u, X[:, 1:], X[:, 1:])
 
