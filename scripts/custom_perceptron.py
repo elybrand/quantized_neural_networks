@@ -37,34 +37,25 @@ logger.setLevel(level=logging.INFO)
 logger.addHandler(fh)
 logger.addHandler(sh)
 
-# Output shape of conv2d layer is
-# np.floor((height - kernel_height + padding + stride)/stride) x ...
-
-# Output shape of max pooling with padding 'valid' (i.e. no padding)
-# np.floor((input_shape - pool_size + 1)/strides)
-# Otherwise, with padding it's
-# np.floor(input_shape/strides)
-
 # Make a directory to store serialized models.
 timestamp = str(pd.Timestamp.now())
 serialized_model_dir = f"../serialized_models/experiment_{timestamp}".replace(" ", "_")
 mkdir(serialized_model_dir)
 
-# Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
+# Here are all the parameters we iterate over. Don't go too crazy here.
 
-# TODO: fix quant_train_size
 
-quant_train_size = 60000
+quant_train_size = 10000
 
 data_sets = ["mnist"]
 np_seeds = [0]
 tf_seeds = [0]
-layer_widths = [(5,)]
+layer_widths = [(100,)]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]
 train_batch_sizes = [128]
 epochs = [1]
-ignore_layers = [[2]]
+ignore_layers = [[]]
 retrain_tries = [1]
 retrain_init = ["greedy"]
 bits = [np.log2(i) for i in (3,)]
@@ -249,8 +240,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             ignore_layers=parameters.ignore_layers,
         )
 
-        # TODO: remove later
-        my_quant_net.quantize_network(use_greedy=True)
+        my_quant_net.quantize_network()
 
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
@@ -263,7 +253,10 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     # Set all the weights to be equal at first. This matters for batch normalization layers.
     MSQ_model.set_weights(model.get_weights())
     for layer_idx, layer in enumerate(model.layers):
-        if layer.__class__.__name__ in ("Dense", "Conv2D"):
+        if (
+            layer.__class__.__name__ in ("Dense", "Conv2D")
+            and layer_idx not in parameters.ignore_layers
+        ):
             # Use the same radius as the alphabet in the corresponding layer of the Sigma Delta network.
             rad = max(
                 my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten()
