@@ -11,6 +11,7 @@ from numpy import (
     abs,
     delete,
     inf,
+    argmax,
 )
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
@@ -21,6 +22,7 @@ from collections import namedtuple
 from itertools import product
 from matplotlib.pyplot import subplots
 from matplotlib.axes import Axes
+import time
 
 QuantizedNeuron = namedtuple("QuantizedNeuron", ["layer_idx", "neuron_idx", "q", "U"])
 QuantizedFilter = namedtuple(
@@ -270,14 +272,17 @@ class QuantizedNeuralNetwork:
 
         return SortedDirections(wX=new_wX, qX=new_qX, permutation=tuple(used_idxs))
 
-    def quantize_layer(self, layer_idx: int, order: int, use_greedy: bool):
+    def reorder_bits(self, q: array, permutation: tuple):
+        new_q = zeros(q.shape)
+        for idx, perm_coord in enumerate(permutation):
+            new_q[perm_coord] = q[idx]
+        return new_q
 
+    def get_layer_data(self, layer_idx: int):
         W = self.trained_net.layers[layer_idx].get_weights()[0]
         N_ell, N_ell_plus_1 = W.shape
         wX = zeros((self.batch_size, N_ell))
         qX = zeros((self.batch_size, N_ell))
-        # Placeholder for the weight matrix in the quantized network.
-        Q = zeros((N_ell, N_ell_plus_1))
         if layer_idx == 0:
             # Data are assumed to be independent.
             wX = zeros((self.batch_size, N_ell))
@@ -313,6 +318,24 @@ class QuantizedNeuralNetwork:
             wX = prev_trained_output([wBatch])[0]
             qX = prev_quant_output([qBatch])[0]
 
+        return (wX, qX)
+
+    def update_weights(self, layer_idx: int, Q: array):
+        # Update the quantized network. Use the same bias vector as in the analog network for now.
+        if self.trained_net.layers[layer_idx].use_bias:
+            bias = self.trained_net.layers[layer_idx].get_weights()[1]
+            self.quantized_net.layers[layer_idx].set_weights([Q, bias])
+        else:
+            self.quantized_net.layers[layer_idx].set_weights([Q])
+
+    def quantize_layer(self, layer_idx: int, order: int, use_greedy: bool):
+        W = self.trained_net.layers[layer_idx].get_weights()[0]
+        N_ell, N_ell_plus_1 = W.shape
+        # Placeholder for the weight matrix in the quantized network.
+        Q = zeros(W.shape)
+        N_ell_plus_1 = W.shape[1]
+        wX, qX = self.get_layer_data(layer_idx)
+
         # Set the radius of the alphabet.
         rad = self.alphabet_scalar * median(abs(W.flatten()))
 
@@ -341,21 +364,83 @@ class QuantizedNeuralNetwork:
                     permutation=sorted_dirs.permutation,
                 )
                 # Permute the bit string to what it should be.
-                Q[:, neuron_idx] = array(
-                    [qNeuron.q[idx] for idx in sorted_dirs.permutation]
-                )
+                Q[:, neuron_idx] = self.reorder_bits(qNeuron.q, sorted_dirs.permutation)
 
             if self.logger:
                 self.logger.info(
                     f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}"
                 )
 
-        # Update the quantized network. Use the same bias vector as in the analog network for now.
-        if self.trained_net.layers[layer_idx].use_bias:
-            bias = self.trained_net.layers[layer_idx].get_weights()[1]
-            self.quantized_net.layers[layer_idx].set_weights([Q, bias])
-        else:
-            self.quantized_net.layers[layer_idx].set_weights([Q])
+            self.update_weights(layer_idx, Q)
+
+    def quantize_neuron_mp(
+        self, layer_idx: int, neuron_idx: int, wX: array, qX: array, rad=1
+    ) -> QuantizedNeuron:
+        d, N = wX.shape
+        w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
+        q = zeros(N)
+        residual = wX @ w
+        layer_alphabet = rad * self.alphabet
+        permutation = []
+        tic = time.perf_counter()
+        qX_unit = array(
+            [x / norm(x) if norm(x) > 10 ** (-16) else zeros(d) for x in qX.T]
+        ).T
+        toc = time.perf_counter()
+        # self.logger.info(f"\t\t{toc-tic:.2f} seconds to normalize qX")
+
+        # TODO: maybe you can cleverly keep track of indexing and delete as you go?
+        # This may speed things up by a constant factor, but not by an order of magnitude.
+        for t in range(N):
+            # Find the vector whose direction is maximally aligned with the residual.
+            tic = time.perf_counter()
+            next_dir_idx = argmax(
+                [
+                    abs(x @ residual) if idx not in permutation else -inf
+                    for idx, x in enumerate(qX_unit.T)
+                ]
+            )
+            toc = time.perf_counter()
+            # self.logger.info(f"\t\t{toc-tic:.2f} seconds to find next direction")
+            x = qX[:, next_dir_idx]
+            tic = time.perf_counter()
+            q[t] = layer_alphabet[
+                argmin(
+                    norm(array([residual - bit * x for bit in layer_alphabet]), axis=1)
+                )
+            ]
+            toc = time.perf_counter()
+            # self.logger.info(f"\t\t{toc-tic:.2f} seconds to find best bit")
+            permutation += [next_dir_idx]
+            residual -= q[t] * x
+
+        # Permute q so that it follows the proper ordering of the feature data.
+        q = self.reorder_bits(q, permutation)
+        return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, U=None, q=q)
+
+    def quantize_layer_mp(self, layer_idx: int):
+        """
+        Uses matching pursuit to calculate the bits.
+        """
+
+        wX, qX = self.get_layer_data(layer_idx)
+        W = self.trained_net.layers[layer_idx].get_weights()[0]
+        N = W.shape[1]
+        Q = zeros(W.shape)
+        # rad = self.alphabet_scalar * median(abs(W.flatten()))
+        rad = 1
+
+        for neuron_idx in range(N):
+            tic = time.perf_counter()
+            qNeuron = self.quantize_neuron_mp(layer_idx, neuron_idx, wX, qX, rad)
+            toc = time.perf_counter()
+            # self.logger.info(f"\t{toc-tic:.2f} seconds to quantize neuron  {neuron_idx}")
+            Q[:, neuron_idx] = qNeuron.q
+
+            # if self.logger:
+            #     self.logger.info(f"\tFinished quantizing neuron {neuron_idx} of {N}")
+
+        self.update_weights(layer_idx, Q)
 
     def quantize_network(self, use_greedy=False):
 
@@ -368,7 +453,8 @@ class QuantizedNeuralNetwork:
                 # Only quantize dense layers.
                 if self.logger:
                     self.logger.info(f"Quantizing layer {layer_idx}...")
-                self.quantize_layer(layer_idx, self.order, use_greedy=use_greedy)
+                # self.quantize_layer(layer_idx, order=1, use_greedy=False)
+                self.quantize_layer_mp(layer_idx)
 
 
 class QuantizedCNN(QuantizedNeuralNetwork):
