@@ -40,7 +40,7 @@ y_train = to_categorical(y_train, num_classes)
 y_test = to_categorical(y_test, num_classes)
 
 # Build perceptron. We will vectorize the images.
-hidden_layer_sizes = [300, 100]
+hidden_layer_sizes = (1000,)
 activation = "relu"
 kernel_initializer = GlorotUniform()
 model = Sequential()
@@ -70,25 +70,21 @@ model.add(Dense(num_classes, kernel_initializer=kernel_initializer, activation="
 num_layers = len(model.layers)
 
 # Use SGD. Set momentum to 0.9 if you want to match MATLAB
-model.compile(optimizer=SGD(), loss="categorical_crossentropy", metrics=["accuracy"])
+model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
 history = model.fit(
-    X_train,
-    y_train,
-    batch_size=128,
-    epochs=20,
-    verbose=True,
-    validation_split=0.20,
+    X_train, y_train, batch_size=128, epochs=200, verbose=True, validation_split=0.10,
 )
+analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
 
 get_data = (sample for sample in X_train)
-for i in range(num_layers-1):
+for i in range(num_layers - 1):
     # Chain together iterators over the entire training set. This is so each layer uses
     # the entire training data.
     get_data = chain(get_data, (sample for sample in X_train))
 # get_data2 = (sample for sample in X_train)
 batch_size = X_train.shape[0]
 alphabet_scalar = 2
-ignore_layers = [] 
+ignore_layers = []
 bits = np.log2(3)
 my_quant_net = QuantizedNeuralNetwork(
     network=model,
@@ -123,7 +119,7 @@ my_quant_net.quantized_net.compile(
 # my_quant_net2.quantized_net.compile(
 #     optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
 # )
-analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
+
 q_loss, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose=True)
 # q2_loss, q2_accuracy = my_quant_net2.quantized_net.evaluate(X_test, y_test, verbose=True)
 
