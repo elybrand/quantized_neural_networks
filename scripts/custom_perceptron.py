@@ -45,21 +45,21 @@ mkdir(serialized_model_dir)
 # Here are all the parameters we iterate over. Don't go too crazy here.
 
 
-quant_train_size = 10000
+quant_train_size = 60000
 
 data_sets = ["mnist"]
 np_seeds = [0]
 tf_seeds = [0]
-layer_widths = [(100,)]
+layer_widths = [(1000)]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]
 train_batch_sizes = [128]
-epochs = [1]
+epochs = [200]
 ignore_layers = [[]]
 retrain_tries = [1]
 retrain_init = ["greedy"]
 bits = [np.log2(i) for i in (3,)]
-alphabet_scalars = [2]
+alphabet_scalars = [2, 3]
 
 parameter_grid = product(
     data_sets,
