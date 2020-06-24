@@ -453,8 +453,8 @@ class QuantizedNeuralNetwork:
                 # Only quantize dense layers.
                 if self.logger:
                     self.logger.info(f"Quantizing layer {layer_idx}...")
-                # self.quantize_layer(layer_idx, order=1, use_greedy=False)
-                self.quantize_layer_mp(layer_idx)
+                self.quantize_layer(layer_idx, order=1, use_greedy=False)
+                # self.quantize_layer_mp(layer_idx)
 
 
 class QuantizedCNN(QuantizedNeuralNetwork):
