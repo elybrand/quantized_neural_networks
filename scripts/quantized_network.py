@@ -218,8 +218,10 @@ class QuantizedNeuralNetwork:
         w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
         if permutation is not None:
             if self.logger:
-                self.logger.info("\tPermuting weights...")
+                self.logger.info("\tPermuting weights and directions...")
             w = [w[idx] for idx in permutation]
+            wX = array([wX[:, idx] for idx in permutation]).T
+            qX = array([qX[:, idx] for idx in permutation]).T
         q = zeros(N_ell)
         U = zeros((N_ell, self.batch_size))
         # Take columns of the data matrix, since the samples are given via the rows.
@@ -228,6 +230,10 @@ class QuantizedNeuralNetwork:
         for t in range(1, N_ell):
             q[t] = self.quantize_weight(w[t], U[t - 1, :], wX[:, t], qX[:, t], rad)
             U[t, :] = U[t - 1, :] + w[t] * wX[:, t] - q[t] * qX[:, t]
+
+        # Reorder bit string.
+        if permutation is not None:
+            q = self.reorder_bits(q, permutation)
 
         return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q, U=U)
 
@@ -339,9 +345,9 @@ class QuantizedNeuralNetwork:
         # Set the radius of the alphabet.
         rad = self.alphabet_scalar * median(abs(W.flatten()))
 
-        # Sort all directions beforehand.
-        if use_greedy:
-            sorted_dirs = self.sort_directions(wX, qX)
+        # # Sort all directions beforehand.
+        # if use_greedy:
+        #     sorted_dirs = self.sort_directions(wX, qX)
 
         for neuron_idx in range(N_ell_plus_1):
             if order == 1 and not use_greedy:
@@ -352,19 +358,13 @@ class QuantizedNeuralNetwork:
                 Q[:, neuron_idx] = qNeuron.q
             if use_greedy:
 
-                w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
-                new_w = [w[idx] for idx in sorted_dirs.permutation]
-
+                # Sort the directions based on matching pursuit permutation.
+                permutation = self.quantize_neuron_mp(layer_idx, neuron_idx, wX, qX, rad)
                 qNeuron = self.quantize_neuron(
-                    layer_idx,
-                    neuron_idx,
-                    sorted_dirs.wX,
-                    sorted_dirs.qX,
-                    rad,
-                    permutation=sorted_dirs.permutation,
+                    layer_idx, neuron_idx, wX, qX, rad, permutation=permutation,
                 )
-                # Permute the bit string to what it should be.
-                Q[:, neuron_idx] = self.reorder_bits(qNeuron.q, sorted_dirs.permutation)
+
+                Q[:, neuron_idx] = qNeuron.q
 
             if self.logger:
                 self.logger.info(
@@ -387,36 +387,39 @@ class QuantizedNeuralNetwork:
             [x / norm(x) if norm(x) > 10 ** (-16) else zeros(d) for x in qX.T]
         ).T
         toc = time.perf_counter()
-        # self.logger.info(f"\t\t{toc-tic:.2f} seconds to normalize qX")
+        if self.logger:
+            self.logger.info(f"\t\t{toc-tic:.2f} seconds to normalize qX")
 
         # TODO: maybe you can cleverly keep track of indexing and delete as you go?
         # This may speed things up by a constant factor, but not by an order of magnitude.
+        if self.logger is not None:
+            self.logger.info("\t\tRunning matching pursuit...")
+        tic = time.perf_counter()
         for t in range(N):
             # Find the vector whose direction is maximally aligned with the residual.
-            tic = time.perf_counter()
             next_dir_idx = argmax(
                 [
                     abs(x @ residual) if idx not in permutation else -inf
                     for idx, x in enumerate(qX_unit.T)
                 ]
             )
-            toc = time.perf_counter()
-            # self.logger.info(f"\t\t{toc-tic:.2f} seconds to find next direction")
             x = qX[:, next_dir_idx]
-            tic = time.perf_counter()
             q[t] = layer_alphabet[
                 argmin(
                     norm(array([residual - bit * x for bit in layer_alphabet]), axis=1)
                 )
             ]
-            toc = time.perf_counter()
-            # self.logger.info(f"\t\t{toc-tic:.2f} seconds to find best bit")
             permutation += [next_dir_idx]
             residual -= q[t] * x
 
+        toc = time.perf_counter()
+        if self.logger:
+            self.logger.info(f"\t\t{toc-tic:.2f} seconds to finish matching pursuit.")
+
         # Permute q so that it follows the proper ordering of the feature data.
-        q = self.reorder_bits(q, permutation)
-        return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, U=None, q=q)
+        # q = self.reorder_bits(q, permutation)
+        # return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, U=None, q=q)
+        return permutation
 
     def quantize_layer_mp(self, layer_idx: int):
         """
@@ -453,7 +456,7 @@ class QuantizedNeuralNetwork:
                 # Only quantize dense layers.
                 if self.logger:
                     self.logger.info(f"Quantizing layer {layer_idx}...")
-                self.quantize_layer(layer_idx, order=1, use_greedy=False)
+                self.quantize_layer(layer_idx, order=1, use_greedy=use_greedy)
                 # self.quantize_layer_mp(layer_idx)
 
 
