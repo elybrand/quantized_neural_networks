@@ -48,9 +48,9 @@ mkdir(serialized_model_dir)
 quant_train_size = 60000
 
 data_sets = ["mnist"]
-np_seeds = [0]
-tf_seeds = [0]
-layer_widths = [(1000)]
+np_seeds = [0, 1]
+tf_seeds = [0, 1]
+layer_widths = [(1000,), (800,), (500, 300)]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]
 train_batch_sizes = [128]
@@ -134,7 +134,6 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     # quant_train_idxs = list(set(np.arange(train_size)) - set(net_train_idxs))
 
     # Split labels from data. Use one-hot encoding for labels.
-    # MNIST ONLY: Reshape images to 28x28x1, because tensorflow is whiny.
     X_train, y_train = train
     X_test, y_test = test
 
