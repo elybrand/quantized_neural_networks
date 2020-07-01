@@ -12,6 +12,7 @@ from tensorflow.keras.layers import (
     Flatten,
     Dropout,
 )
+from tensorflow.keras.optimizers import SGD
 from tensorflow.keras.initializers import (
     RandomNormal,
     GlorotUniform,
@@ -19,9 +20,11 @@ from tensorflow.keras.initializers import (
     RandomUniform,
 )
 from tensorflow.keras.models import Sequential, clone_model, save_model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.datasets import mnist, cifar10
 from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedCNN
+from itertools import chain
 from sys import stdout
 from os import mkdir
 
@@ -36,50 +39,36 @@ logger.setLevel(level=logging.INFO)
 logger.addHandler(fh)
 logger.addHandler(sh)
 
-# Output shape of conv2d layer is
-# np.floor((height - kernel_height + padding + stride)/stride) x ...
-
-# Output shape of max pooling with padding 'valid' (i.e. no padding)
-# np.floor((input_shape - pool_size + 1)/strides)
-# Otherwise, with padding it's
-# np.floor(input_shape/strides)
-
-# This parameter grid assumes the following network topology:
-# Conv2D -> MaxPooling2D -> BatchNormalization -> Dropout -> Conv2D -> MaxPooling2D -> BatchNormalization -> Dropout -> Dense
-
 # Make a directory to store serialized models.
 timestamp = str(pd.Timestamp.now())
 serialized_model_dir = f"../serialized_models/experiment_{timestamp}".replace(" ", "_")
 mkdir(serialized_model_dir)
 
-# Here are all the parameters we iterate over. Don't go too crazy here. Training CNN's is very slow.
+# Here are all the parameters we iterate over.
 
-#TODO: Cross validate over the alphabet scalar!!
-
-data_sets = ["mnist"]
-np_seeds = [0, 1]#, 2]
-tf_seeds = [0, 1]#, 2]
-kernels_per_layer = [(16, 8) , (32, 16), (64, 32)]
+data_sets = ["cifar10"]
+np_seeds = [0]
+tf_seeds = [0]
+kernels_per_layer = [(64, 32)]
 rectifiers = ["relu"]
-kernel_inits = [GlorotUniform, GlorotNormal]
+kernel_inits = [GlorotUniform]
 conv_kernel_sizes = [
-    # (5, 4),
-    (4, 3),
-    #(3, 2),
+    (7, 3),
 ]  # All kernels assumed to be square. Tuples indicate shapes per layer.
 conv_strides = [
     (2, 2)
 ]  # Strides assumed to be equal along all dimensions. Tuples indicate shapes per layer.
-dropout_rates = [(0.2, 0.2), (0.35, 0.35), (0.5, 0.5)]
-pool_sizes = [(4, 2), (3, 2), (2,2)]
+dropout_rates = [(0.2, 0.2)]#, (0.35, 0.35), (0.5, 0.5)]
+pool_sizes = [(2,2)]
 pool_strides = [(2, 2)]
 train_batch_sizes = [128]
-epochs = [10]
-q_train_sizes = [10 ** 4]
+epochs = [50]
+q_train_sizes = [10]
 ignore_layers = [[]]
-retrain_tries = [1, 2]#, 4]
+retrain_tries = [1]
 retrain_init = ["greedy"]
-bits = [np.log2(i) for i in  (3, 16, 32)]
+bits = [np.log2(i) for i in  (3,)]
+alphabet_scalars = [2]
 
 parameter_grid = product(
     data_sets,
@@ -100,13 +89,14 @@ parameter_grid = product(
     retrain_tries,
     retrain_init,
     bits,
+    alphabet_scalars,
 )
 
 ParamConfig = namedtuple(
     "ParamConfig",
     "data_set, np_seed, tf_seed, kernels_per_layer, rectifier, kernel_init, conv_kernel_sizes, conv_strides, "
     "dropout_rates, pool_sizes, pool_strides, train_batch_size, epochs, q_train_size, ignore_layers, retrain_tries,"
-    "retrain_init, bits",
+    "retrain_init, bits, alphabet_scalar",
 )
 param_iterable = (ParamConfig(*config) for config in parameter_grid)
 
@@ -132,6 +122,7 @@ model_metrics = pd.DataFrame(
         "retrain_tries": [],
         "retrain_init": [],
         "bits": [],
+        "alphabet_scalar": [],
         "analog_test_acc": [],
         "sd_test_acc": [],
         "msq_test_acc": [],
@@ -153,14 +144,18 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     # one for training the quantization. For now, split it evenly.
     train_size = train[0].shape[0]
     quant_train_size = parameters.q_train_size
-    net_train_size = train_size - quant_train_size
-    net_train_idxs = np.random.choice(train_size, size=net_train_size, replace=False)
-    quant_train_idxs = list(set(np.arange(train_size)) - set(net_train_idxs))
+    # net_train_size = train_size - quant_train_size
+    # net_train_idxs = np.random.choice(train_size, size=net_train_size, replace=False)
+    # quant_train_idxs = list(set(np.arange(train_size)) - set(net_train_idxs))
 
-    # Split labels from data. Use one-hot encoding for labels.
-    # MNIST ONLY: Reshape images to 28x28x1, because tensorflow is whiny.
     X_train, y_train = train
     X_test, y_test = test
+
+    # Normalize pixel values.
+    X_train = X_train.astype('float32')
+    X_test = X_test.astype('float32')
+    X_train = X_train / 255.0
+    X_test = X_test / 255.0
 
     # MNIST only
     if parameters.data_set == "mnist":
@@ -174,63 +169,89 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     y_test = to_categorical(y_test, num_classes)
     input_shape = X_train[0].shape
 
-    # Futher separate training
-    X_net_train = X_train[net_train_idxs]
-    y_net_train = y_train[net_train_idxs]
-
-    X_quant_train = X_train[quant_train_idxs]
-
     try:
-        # Construct a basic convolutional neural network.
+        # # Construct a basic convolutional neural network.
+        # model = Sequential()
+        # # model.add(Dropout(0.2, input_shape=input_shape))
+        # model.add(
+        #     Conv2D(
+        #         filters=parameters.kernels_per_layer[0],
+        #         kernel_size=parameters.conv_kernel_sizes[0],
+        #         strides=(parameters.conv_strides[0], parameters.conv_strides[0]),
+        #         activation=parameters.rectifier,
+        #         kernel_initializer=parameters.kernel_init(),
+        #         input_shape=input_shape,
+        #     )
+        # )
+
+        # model.add(
+        #     MaxPooling2D(
+        #         pool_size=(parameters.pool_sizes[0], parameters.pool_sizes[0]),
+        #         strides=(parameters.pool_strides[0], parameters.pool_strides[0]),
+        #         padding="valid",
+        #     )
+        # )
+
+        # model.add(BatchNormalization())
+        # model.add(Dropout(parameters.dropout_rates[0]))
+        # model.add(
+        #     Conv2D(
+        #         filters=parameters.kernels_per_layer[1],
+        #         kernel_size=parameters.conv_kernel_sizes[1],
+        #         strides=(parameters.conv_strides[1], parameters.conv_strides[1]),
+        #         kernel_initializer=parameters.kernel_init(),
+        #         activation=parameters.rectifier,
+        #     )
+        # )
+
+        # model.add(
+        #     MaxPooling2D(
+        #         pool_size=(parameters.pool_sizes[1], parameters.pool_sizes[1]),
+        #         strides=(parameters.pool_strides[1], parameters.pool_strides[1]),
+        #         padding="valid",
+        #     )
+        # )
+
+        # model.add(BatchNormalization())
+        # model.add(Flatten())
+        # model.add(Dropout(parameters.dropout_rates[1]))
+        # model.add(Dense(10, activation="softmax"))
+
+        # model.compile(
+        #     optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"]
+        # )
+
         model = Sequential()
-        # model.add(Dropout(0.2, input_shape=input_shape))
-        model.add(
-            Conv2D(
-                filters=parameters.kernels_per_layer[0],
-                kernel_size=parameters.conv_kernel_sizes[0],
-                strides=(parameters.conv_strides[0], parameters.conv_strides[0]),
-                activation=parameters.rectifier,
-                kernel_initializer=parameters.kernel_init(),
-                input_shape=input_shape,
-            )
-        )
-
-        model.add(
-            MaxPooling2D(
-                pool_size=(parameters.pool_sizes[0], parameters.pool_sizes[0]),
-                strides=(parameters.pool_strides[0], parameters.pool_strides[0]),
-                padding="valid",
-            )
-        )
-
+        model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', input_shape=(32, 32, 3)))
         model.add(BatchNormalization())
-        model.add(Dropout(parameters.dropout_rates[0]))
-        model.add(
-            Conv2D(
-                filters=parameters.kernels_per_layer[1],
-                kernel_size=parameters.conv_kernel_sizes[1],
-                strides=(parameters.conv_strides[1], parameters.conv_strides[1]),
-                kernel_initializer=parameters.kernel_init(),
-                activation=parameters.rectifier,
-            )
-        )
-
-        model.add(
-            MaxPooling2D(
-                pool_size=(parameters.pool_sizes[1], parameters.pool_sizes[1]),
-                strides=(parameters.pool_strides[1], parameters.pool_strides[1]),
-                padding="valid",
-            )
-        )
-
-        model.add(BatchNormalization())
+        # model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+        # model.add(BatchNormalization())
+        # model.add(MaxPooling2D((2, 2)))
+        # model.add(Dropout(0.2))
+        # model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+        # model.add(BatchNormalization())
+        # model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+        # model.add(BatchNormalization())
+        # model.add(MaxPooling2D((2, 2)))
+        # model.add(Dropout(0.3))
+        # model.add(Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+        # model.add(BatchNormalization())
+        # model.add(Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+        # model.add(BatchNormalization())
+        # model.add(MaxPooling2D((2, 2)))
+        # model.add(Dropout(0.4))
         model.add(Flatten())
-        model.add(Dropout(parameters.dropout_rates[1]))
-        model.add(Dense(10, activation="softmax"))
+        # model.add(Dense(128, activation='relu', kernel_initializer='he_uniform'))
+        # model.add(BatchNormalization())
+        # model.add(Dropout(0.5))
+        model.add(Dense(10, activation='softmax'))
+        # compile model
+        opt = SGD(lr=0.001, momentum=0.9)
+        model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
 
-        model.compile(
-            optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"]
-        )
+        datagen = ImageDataGenerator(width_shift_range=0.1, height_shift_range=0.1, horizontal_flip=True)
+        it_train = datagen.flow(X_train, y_train, batch_size=64)
+
     except ValueError:
         # Inconsistent paramter configuration.
         logger.warning(
@@ -238,59 +259,45 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         )
         return
 
-    for train_idx in range(parameters.retrain_tries):
+    # Initialize the weights using the kernel_initializer provided.
+    logger.info(
+        f"Training with parameters {parameters}. Training iteration {train_idx+1} of {parameters.retrain_tries}."
+    )
+    history = model.fit(
+        it_train,
+        epochs=1,
+        verbose=True,
+        validation_data=(X_test, y_test),
+        steps_per_epoch=int(X_train.shape[0] / 64)
+    )
 
-        if train_idx == 0:
-            # Initialize the weights using the kernel_initializer provided.
-            logger.info(
-                f"Training with parameters {parameters}. Training iteration {train_idx+1} of {parameters.retrain_tries}."
-            )
-            history = model.fit(
-                X_net_train,
-                y_net_train,
-                batch_size=parameters.train_batch_size,
-                epochs=parameters.epochs,
-                verbose=True,
-                validation_split=0.20,
-            )
-        else:
-            # Initialize using the quantized network's weights.
-            logger.info(
-                f"Retraining with parameters {parameters}. Training iteration {train_idx+1} of {parameters.retrain_tries}."
-            )
 
-            if parameters.retrain_init == "greedy":
-                model.set_weights(my_quant_net.quantized_net.get_weights())
-            if parameters.retrain_init == "msq":
-                # TODO: Make a MSQ class to handle MSQ networks please.
-                pass
-            history = model.fit(
-                X_net_train,
-                y_net_train,
-                batch_size=parameters.train_batch_size,
-                epochs=parameters.epochs,
-                verbose=True,
-                validation_split=0.20,
-            )
+    model_timestamp = str(pd.Timestamp.now()).replace(" ", "_")
+    model_name = model.__class__.__name__ + str(pd.Timestamp.now()).replace(" ", "_")
+    save_model(model, f"{serialized_model_dir}/{model_name}")
 
-        # Quantize the network.
-        get_data = (sample for sample in X_quant_train)
-        # Make it so all data are used.
-        batch_size = int(np.floor(quant_train_size / (3)))
-        # TODO: add ignore layer sometime in the future.
-        my_quant_net = QuantizedCNN(
-            network=model,
-            batch_size=batch_size,
-            get_data=get_data,
-            logger=logger,
-            bits=parameters.bits,
-        )
-        my_quant_net.quantize_network()
+    analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
+    logger.info(f"Analog network test accuracy = {analog_accuracy:.2f}")
+
+    get_data = (sample for sample in X_train[0:quant_train_size])
+    for i in range(len(parameters.kernels_per_layer) + 1):
+        # Chain together iterators over the entire training set. This is so each layer uses
+        # the entire training data.
+        get_data = chain(get_data, (sample for sample in X_train[0:quant_train_size]))
+    batch_size = quant_train_size
+    my_quant_net = QuantizedCNN(
+        network=model,
+        batch_size=batch_size,
+        get_data=get_data,
+        logger=logger,
+        bits=parameters.bits,
+        alphabet_scalar=parameters.alphabet_scalar,
+    )
+    my_quant_net.quantize_network()
 
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
-    analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
     q_loss, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose=True)
 
     # Construct MSQ Net.
@@ -313,10 +320,6 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
     MSQ_loss, MSQ_accuracy = MSQ_model.evaluate(X_test, y_test, verbose=True)
-
-    model_timestamp = str(pd.Timestamp.now()).replace(" ", "_")
-    model_name = model.__class__.__name__ + str(pd.Timestamp.now()).replace(" ", "_")
-    save_model(model, f"{serialized_model_dir}/{model_name}")
 
     trial_metrics = pd.DataFrame(
         {

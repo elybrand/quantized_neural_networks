@@ -45,21 +45,21 @@ mkdir(serialized_model_dir)
 # Here are all the parameters we iterate over. Don't go too crazy here.
 
 
-quant_train_size = 60000
+quant_train_size = 10
 
-data_sets = ["mnist"]
-np_seeds = [0, 1]
-tf_seeds = [0, 1]
-layer_widths = [(1000,), (800,), (500, 300)]
+data_sets = ["cifar10"]
+np_seeds = [0]
+tf_seeds = [0]
+layer_widths = [(10, 5)]
 rectifiers = ["relu"]
 kernel_inits = [GlorotUniform]
 train_batch_sizes = [128]
-epochs = [200]
+epochs = [1]
 ignore_layers = [[]]
 retrain_tries = [1]
 retrain_init = ["greedy"]
 bits = [np.log2(i) for i in (3,)]
-alphabet_scalars = [2, 3]
+alphabet_scalars = [2]
 
 parameter_grid = product(
     data_sets,
@@ -137,11 +137,6 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     X_train, y_train = train
     X_test, y_test = test
 
-    # Vectorize the images
-    img_size = X_train[0].size
-    X_train = X_train.reshape(X_train.shape[0], img_size)
-    X_test = X_test.reshape(X_test.shape[0], img_size)
-
     num_classes = np.unique(y_train).shape[0]
     y_train = to_categorical(y_train, num_classes)
     y_test = to_categorical(y_test, num_classes)
@@ -155,6 +150,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     try:
         # Construct a basic convolutional neural network.
         model = Sequential()
+        model.add(Flatten(input_shape=X_train[0].shape,))
         for layer_idx, layer_width in enumerate(parameters.layer_widths):
             if layer_idx == 0:
                 model.add(
@@ -163,7 +159,6 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
                         activation=parameters.rectifier,
                         kernel_initializer=parameters.kernel_init(),
                         use_bias=True,
-                        input_dim=img_size,
                     )
                 )
             else:
@@ -189,62 +184,39 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         )
         return
 
-    for train_idx in range(parameters.retrain_tries):
+    history = model.fit(
+        X_train,
+        y_train,
+        batch_size=parameters.train_batch_size,
+        epochs=parameters.epochs,
+        verbose=True,
+        validation_split=0.20,
+    )
 
-        if train_idx == 0:
-            # Initialize the weights using the kernel_initializer provided.
-            logger.info(
-                f"Training with parameters {parameters}. Training iteration {train_idx+1} of {parameters.retrain_tries}."
-            )
-            history = model.fit(
-                X_train,
-                y_train,
-                batch_size=parameters.train_batch_size,
-                epochs=parameters.epochs,
-                verbose=True,
-                validation_split=0.20,
-            )
-        else:
-            # Initialize using the quantized network's weights.
-            logger.info(
-                f"Retraining with parameters {parameters}. Training iteration {train_idx+1} of {parameters.retrain_tries}."
-            )
+    analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
+    logger.info(f"Analog model test accuracy = {analog_accuracy:.2f}")
 
-            if parameters.retrain_init == "greedy":
-                model.set_weights(my_quant_net.quantized_net.get_weights())
-            if parameters.retrain_init == "msq":
-                # TODO: Make a MSQ class to handle MSQ networks please.
-                pass
-            history = model.fit(
-                X_train,
-                y_train,
-                batch_size=parameters.train_batch_size,
-                epochs=parameters.epochs,
-                verbose=True,
-                validation_split=0.20,
-            )
-        get_data = (sample for sample in X_train[0:quant_train_size])
-        for i in range(len(parameters.layer_widths) + 1):
-            # Chain together iterators over the entire training set. This is so each layer uses
-            # the entire training data.
-            get_data = chain(get_data, (sample for sample in X_train[0:quant_train_size]))
-        batch_size = quant_train_size
-        my_quant_net = QuantizedNeuralNetwork(
-            network=model,
-            batch_size=batch_size,
-            get_data=get_data,
-            logger=logger,
-            bits=parameters.bits,
-            alphabet_scalar=parameters.alphabet_scalar,
-            ignore_layers=parameters.ignore_layers,
-        )
+    get_data = (sample for sample in X_train[0:quant_train_size])
+    for i in range(len(parameters.layer_widths) + 1):
+        # Chain together iterators over the entire training set. This is so each layer uses
+        # the entire training data.
+        get_data = chain(get_data, (sample for sample in X_train[0:quant_train_size]))
+    batch_size = quant_train_size
+    my_quant_net = QuantizedNeuralNetwork(
+        network=model,
+        batch_size=batch_size,
+        get_data=get_data,
+        logger=logger,
+        bits=parameters.bits,
+        alphabet_scalar=parameters.alphabet_scalar,
+        ignore_layers=parameters.ignore_layers,
+    )
 
-        my_quant_net.quantize_network()
+    my_quant_net.quantize_network()
 
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
-    analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
     q_loss, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose=True)
 
     # Construct MSQ Net.
@@ -261,7 +233,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
                 my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten()
             )
             W, b = model.layers[layer_idx].get_weights()
-            Q = np.array([my_quant_net.bit_round(w, rad) for w in W.flatten()]).reshape(
+            Q = np.array([my_quant_net._bit_round(w, rad) for w in W.flatten()]).reshape(
                 W.shape
             )
             MSQ_model.layers[layer_idx].set_weights([Q, b])
