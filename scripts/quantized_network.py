@@ -22,7 +22,7 @@ from collections import namedtuple
 from itertools import product
 from matplotlib.pyplot import subplots
 from matplotlib.axes import Axes
-import time
+from time import time
 
 QuantizedNeuron = namedtuple("QuantizedNeuron", ["layer_idx", "neuron_idx", "q"])
 QuantizedFilter = namedtuple(
@@ -75,6 +75,12 @@ class QuantizedNeuralNetwork:
         self.logger = logger
 
         self.ignore_layers = ignore_layers
+
+    def _log(self, msg: str):
+        if self.logger:
+            self.logger.info(msg)
+        else:
+            print(msg)
 
     def _bit_round(self, t: float, rad: float) -> float:
         """Rounds a quantity to the nearest atom in the (scaled) quantization alphabet.
@@ -259,13 +265,12 @@ class QuantizedNeuralNetwork:
         rad = self.alphabet_scalar * median(abs(W.flatten()))
 
         for neuron_idx in range(N_ell_plus_1):
+            self._log(f"\tQuantizing neuron {neuron_idx} of {N_ell_plus_1}...")
+            tic = time()
             qNeuron = self._quantize_neuron(layer_idx, neuron_idx, wX, qX, rad)
             Q[:, neuron_idx] = qNeuron.q
 
-            if self.logger:
-                self.logger.info(
-                    f"\tFinished quantizing neuron {neuron_idx} of {N_ell_plus_1}"
-                )
+            self._log(f"\tdone. {time() - tic :.2f} seconds.")
 
             self._update_weights(layer_idx, Q)
 
@@ -279,9 +284,11 @@ class QuantizedNeuralNetwork:
                 and layer_idx not in self.ignore_layers
             ):
                 # Only quantize dense layers.
-                if self.logger:
-                    self.logger.info(f"Quantizing layer {layer_idx}...")
+                self._log(f"Quantizing layer {layer_idx}...")
+
                 self._quantize_layer(layer_idx)
+
+                self._log(f"done. {layer_idx}...")
 
 
 class QuantizedCNN(QuantizedNeuralNetwork):
@@ -324,10 +331,10 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Strides of the kernel for a Conv2D layer.
         padding : string
             Either 'valid' or 'same', as in docstring for Conv2D layer.
-        wX : array
-            Layer input for the analog convolutional neural network.
-        qX : array
-            Layer input for the quantized convolutional neural network.
+        wX : 2D array
+            Layer (channel) input for the analog convolutional neural network.
+        qX : 2D array
+            Layer (channel) input for the quantized convolutional neural network.
 
         Returns
         -------
@@ -381,10 +388,12 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Index of the neuron in the Conv2D layer.
         channel_idx : int
             Index of the channel in the Conv2D layer.
-        wX : array
-            Layer (channel) input for the analog convolutional neural network. 
-        qX : array
-            Layer (channel) input for the quantized convolutional neural network.
+        wX : 2D array
+            Layer (channel) input for the analog convolutional neural network, where 
+            the rows are vectorized patches. 
+        qX : 2D array
+            Layer (channel) input for the quantized convolutional neural network, where 
+            the rows are vectorized patches.
         rad : float
             Scaling factor for the quantization alphabet.
 
@@ -421,7 +430,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                 )
 
     def _quantize_filter2D(
-        self, layer_idx: int, filter_idx: int, wX: array, qX: array, rad: float
+        self, layer_idx: int, filter_idx: int, wX_patch_tensor: array, qX_patch_tensor: array, rad: float
     ) -> List[QuantizedFilter]:
         """Quantizes a given filter, or kernel, in a Conv2D layer by quantizing each channel filter
         as though it were a neuron in a perceptron.
@@ -432,6 +441,47 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Index of the Conv2D layer.
         filter_idx : int
             Index of the filter in the Conv2D layer.
+        wX_patch_tensor : 3D array
+            Patch tensor as in the return of _get_patch_tensors
+        qX_patch_tensor : array
+            Patch tensor as in the return of _get_patch_tensors
+
+        Returns
+        -------
+        quantized_chan_filter_list: List[QuantizedFilter]
+            Returns a list of quantized channel filters.
+        """
+        num_channels = wX_patch_tensor.shape[-1]
+        quantized_chan_filter_list =[
+            self._quantize_channel(
+                layer_idx, 
+                filter_idx, 
+                channel_idx, 
+                wX_patch_tensor[:,:,channel_idx], 
+                qX_patch_tensor[:,:,channel_idx], 
+                rad,
+            )
+            for channel_idx in range(num_channels)
+            ]
+
+        return quantized_chan_filter_list
+
+    def _quantize_dense_layer(self, layer_idx: int):
+
+        super()._quantize_layer(layer_idx)
+
+    def _get_patch_tensors(self, kernel_size: tuple, strides: tuple, padding: str, wX: array, qX: array) -> tuple:
+        """Returns a 3D tensor whose first two axes encode the 2D tensor of vectorized
+        patches of images, and the last axis encodes the channel.
+
+        Parameters
+        -----------
+        kernel_size: tuple
+            Tuple of integers encoding the dimensions of the filter/kernel
+        strides: tuple
+            Tuple of integers encoding the stride information of the filter/kernel
+        padding: string
+            Padding argument for Conv2D layer.
         wX : array
             Layer input for the analog convolutional neural network.
         qX : array
@@ -439,19 +489,13 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
         Returns
         -------
-        quantized_chan_filter_list: List[QuantizedFilter]
-            Returns a list of quantized channel filters.
+        (wX_patch_tensor, qX_patch_tensor): tuple(array, array) 
+            The two patch tensors for the analog and quantized networks, respectively.
         """
-
-        num_channels = wX.shape[-1]
-        layer = self.trained_net.layers[layer_idx]
-        kernel_size = layer.kernel_size
-        strides = layer.strides
-        padding = layer.padding.upper()
-        quantized_chan_filter_list = []
-
+        num_channels = wX[0].shape[-1]
+        wX_patch_tensor = None
+        qX_patch_tensor = None
         for channel_idx in range(num_channels):
-
             channel_wX = wX[:, :, :, channel_idx]
             channel_qX = qX[:, :, :, channel_idx]
 
@@ -463,36 +507,42 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                 kernel_size, strides, padding, channel_wX, channel_qX
             )
 
-            quantized_chan_filter_list += [
-                self._quantize_channel(layer_idx, filter_idx, channel_idx, *seg_data, rad)
-            ]
+            if wX_patch_tensor is None:
+                wX_patch_tensor = zeros((*seg_data[0].shape, num_channels))
+                qX_patch_tensor = zeros(wX_patch_tensor.shape)
 
-        return quantized_chan_filter_list
+            wX_patch_tensor[:, :, channel_idx] = seg_data.wX_seg
+            qX_patch_tensor[:, :, channel_idx] = seg_data.qX_seg
 
-    def _quantize_dense_layer(self, layer_idx: int):
-
-        super()._quantize_layer(layer_idx)
+        return (wX_patch_tensor, qX_patch_tensor)
 
     def _quantize_conv2D_layer(self, layer_idx: int):
         # wX formatted as an array of images. No flattening.
         layer = self.trained_net.layers[layer_idx]
         num_filters = layer.filters
         filter_shape = layer.kernel_size
+        strides = layer.strides
+        padding = layer.padding.upper()
         W = layer.get_weights()[0]
         num_channels = W.shape[-2]  
 
         input_shape = self.trained_net.layers[0].input_shape[1:]
 
         wX, qX = super()._get_layer_data(layer_idx)
+        super()._log("\tBuilding patch tensors...")
 
-        # Set the radius of the alphabet.
+        tic = time()
+        wX_patch_tensor, qX_patch_tensor = self._get_patch_tensors(filter_shape, strides, padding, wX, qX)
+        print(f"\tdone. {time() - tic:.2f} seconds.")
+
         rad = self.alphabet_scalar * median(abs(W.flatten()))
-
         Q = zeros(W.shape)
 
         for filter_idx in range(num_filters):
+            super()._log(f"\tQuantizing filter {filter_idx} of {num_filters}...")
+            tic = time()
             quantized_chan_filter_list = self._quantize_filter2D(
-                layer_idx, filter_idx, wX, qX, rad
+                layer_idx, filter_idx, wX_patch_tensor, qX_patch_tensor, rad
             )
             # Now we need to stack all the channel information together again.
             quantized_filter = zeros((filter_shape[0], filter_shape[1], num_channels))
@@ -502,10 +552,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
             Q[:, :, :, filter_idx] = quantized_filter
 
-            if self.logger:
-                self.logger.info(
-                    f"\tFinished quantizing filter {filter_idx} of {num_filters}"
-                )
+            super()._log(f"\tdone. {time() - tic:.2f} seconds.")
 
         super()._update_weights(layer_idx, Q)
 
@@ -514,10 +561,12 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         for layer_idx, layer in enumerate(self.trained_net.layers):
             if layer.__class__.__name__ == "Dense":
                 # Use parent class quantize layer
-                if self.logger:
-                    self.logger.info(f"Quantizing (dense) layer {layer_idx}...")
+                super()._log(f"Quantizing (dense) layer {layer_idx}...")
+                tic = time()
                 self._quantize_dense_layer(layer_idx)
+                super()._log(f"done. {time() - tic:.2f} seconds.")
             if layer.__class__.__name__ == "Conv2D":
-                if self.logger:
-                    self.logger.info(f"Quantizing (Conv2D) layer {layer_idx}...")
+                super()._log(f"Quantizing (Conv2D) layer {layer_idx}...")
+                tic = time()
                 self._quantize_conv2D_layer(layer_idx)
+                super()._log(f"done. {time() - tic:.2f} seconds.")
