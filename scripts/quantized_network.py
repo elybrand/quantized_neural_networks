@@ -12,6 +12,7 @@ from numpy import (
     delete,
     inf,
     argmax,
+    prod,
 )
 from scipy.linalg import norm
 from tensorflow.keras.backend import function as Kfunction
@@ -23,6 +24,8 @@ from itertools import product
 from matplotlib.pyplot import subplots
 from matplotlib.axes import Axes
 from time import time
+import h5py
+import os
 
 QuantizedNeuron = namedtuple("QuantizedNeuron", ["layer_idx", "neuron_idx", "q"])
 QuantizedFilter = namedtuple(
@@ -317,6 +320,9 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         self.alphabet = linspace(-1, 1, num=int(round(2 ** (bits))))
         self.logger = logger
 
+        # Encodes whether we save the patch tensor as hdf5 files for training a given layer.
+        self.use_hdf5 = [False for layer in network.layers]
+
     def _segment_data2D(
         self, kernel_size: tuple, strides: tuple, padding: str, wX: array, qX: array
     ) -> SegmentedData:
@@ -374,8 +380,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         layer_idx: int,
         filter_idx: int,
         channel_idx: int,
-        wX: array,
-        qX: array,
+        hf,
         rad=1,
     ) -> QuantizedFilter:
         """Quantizes a single channel filter in a Conv2D layer.
@@ -388,12 +393,10 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Index of the neuron in the Conv2D layer.
         channel_idx : int
             Index of the channel in the Conv2D layer.
-        wX : 2D array
-            Layer (channel) input for the analog convolutional neural network, where 
-            the rows are vectorized patches. 
-        qX : 2D array
-            Layer (channel) input for the quantized convolutional neural network, where 
-            the rows are vectorized patches.
+        hf: hdf5 File object
+            Contains the patch tensors for all channels. Every dataset
+            in this file should be a 2D array where the directions of the random
+            walk, or feature data, are *rows*.
         rad : float
             Scaling factor for the quantization alphabet.
 
@@ -403,7 +406,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             A tuple with the layer, filter, and channel index, as well as the quantized channel.
         """
 
-        B = wX.shape[0]
+        B = hf[f"wX_channel0"].shape[1]
         u = zeros(B)
         chan_filtr = self.trained_net.layers[layer_idx].get_weights()[0][:, :, :, filter_idx][:, :, channel_idx]
         filter_shape = chan_filtr.shape
@@ -414,11 +417,11 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             q_filtr[t] = super()._quantize_weight(
                 chan_filtr[t],
                 u,
-                wX[:, t],
-                qX[:, t],
+                hf[f"wX_channel{channel_idx}"][t,:],
+                hf[f"qX_channel{channel_idx}"][t,:],
                 rad,
             )
-            u += chan_filtr[t] * wX[:, t] - q_filtr[t] * qX[:, t]
+            u += chan_filtr[t] * hf[f"wX_channel{channel_idx}"][t,:] - q_filtr[t] * hf[f"qX_channel{channel_idx}"][t,:]
 
         q_filtr = reshape(q_filtr, filter_shape)
 
@@ -430,7 +433,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                 )
 
     def _quantize_filter2D(
-        self, layer_idx: int, filter_idx: int, wX_patch_tensor: array, qX_patch_tensor: array, rad: float
+        self, layer_idx: int, filter_idx: int, hf, rad: float
     ) -> List[QuantizedFilter]:
         """Quantizes a given filter, or kernel, in a Conv2D layer by quantizing each channel filter
         as though it were a neuron in a perceptron.
@@ -441,24 +444,25 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Index of the Conv2D layer.
         filter_idx : int
             Index of the filter in the Conv2D layer.
-        wX_patch_tensor : 3D array
-            Patch tensor as in the return of _get_patch_tensors
-        qX_patch_tensor : array
-            Patch tensor as in the return of _get_patch_tensors
+        hf: hdf5 File object
+            Contains the patch tensors for all channels. Every dataset
+            in this file should be a 2D array where the directions of the random
+            walk, or feature data, are *rows*.
+        rad: float
+            Scaling factor for the quantization alphabet.
 
         Returns
         -------
         quantized_chan_filter_list: List[QuantizedFilter]
             Returns a list of quantized channel filters.
         """
-        num_channels = wX_patch_tensor.shape[-1]
+        num_channels = self.trained_net.layers[layer_idx].input_shape[-1]
         quantized_chan_filter_list =[
             self._quantize_channel(
                 layer_idx, 
                 filter_idx, 
                 channel_idx, 
-                wX_patch_tensor[:,:,channel_idx], 
-                qX_patch_tensor[:,:,channel_idx], 
+                hf, 
                 rad,
             )
             for channel_idx in range(num_channels)
@@ -470,7 +474,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
         super()._quantize_layer(layer_idx)
 
-    def _get_patch_tensors(self, kernel_size: tuple, strides: tuple, padding: str, wX: array, qX: array) -> tuple:
+    def _get_patch_tensors(self, kernel_size: tuple, strides: tuple, padding: str, wX: array, qX: array, hf) -> tuple:
         """Returns a 3D tensor whose first two axes encode the 2D tensor of vectorized
         patches of images, and the last axis encodes the channel.
 
@@ -486,15 +490,14 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Layer input for the analog convolutional neural network.
         qX : array
             Layer input for the quantized convolutional neural network.
+        hf: h5py File ojbect, in write mode.
 
         Returns
         -------
-        (wX_patch_tensor, qX_patch_tensor): tuple(array, array) 
-            The two patch tensors for the analog and quantized networks, respectively.
+
         """
         num_channels = wX[0].shape[-1]
-        wX_patch_tensor = None
-        qX_patch_tensor = None
+
         for channel_idx in range(num_channels):
             channel_wX = wX[:, :, :, channel_idx]
             channel_qX = qX[:, :, :, channel_idx]
@@ -503,20 +506,18 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             channel_wX = reshape(channel_wX, (*channel_wX.shape, 1))
             channel_qX = reshape(channel_qX, (*channel_qX.shape, 1))
 
+            # TODO: You may have to do this in batches as well.
             seg_data = self._segment_data2D(
                 kernel_size, strides, padding, channel_wX, channel_qX
             )
 
-            if wX_patch_tensor is None:
-                wX_patch_tensor = zeros((*seg_data[0].shape, num_channels))
-                qX_patch_tensor = zeros(wX_patch_tensor.shape)
+            # Store the directions in our random walk as ROWS because it makes accessing
+            # them substantially faster.
+            hf.create_dataset(f"wX_channel{channel_idx}", data = seg_data.wX_seg.T)
+            hf.create_dataset(f"qX_channel{channel_idx}", data = seg_data.qX_seg.T)
 
-            # TODO: consider storing these tensors in hdf5 format. Make sure they're column ordered, or if need be
-            # transpose the slices in the tensor. Remember: you want one seek, one read per slice.
-            wX_patch_tensor[:, :, channel_idx] = seg_data.wX_seg
-            qX_patch_tensor[:, :, channel_idx] = seg_data.qX_seg
-
-        return (wX_patch_tensor, qX_patch_tensor)
+            # Delete seg_data to prevent memory leak across loop iterations.
+            del seg_data
 
     def _quantize_conv2D_layer(self, layer_idx: int):
         # wX formatted as an array of images. No flattening.
@@ -533,30 +534,39 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         wX, qX = super()._get_layer_data(layer_idx)
         super()._log("\tBuilding patch tensors...")
 
-        tic = time()
-        wX_patch_tensor, qX_patch_tensor = self._get_patch_tensors(filter_shape, strides, padding, wX, qX)
-        print(f"\tdone. {time() - tic:.2f} seconds.")
+                # Create hdf5 file to store patch tensors.
+        with h5py.File(f"layer{layer_idx}_patch_tensors.h5", 'w') as hf:
+            tic = time()
+            # This saves the patch tensors to disk, and closes the file object.
+            self._get_patch_tensors(filter_shape, strides, padding, wX, qX, hf)
+            print(f"\tdone. {time() - tic:.2f} seconds.")
 
         rad = self.alphabet_scalar * median(abs(W.flatten()))
         Q = zeros(W.shape)
 
-        for filter_idx in range(num_filters):
-            super()._log(f"\tQuantizing filter {filter_idx} of {num_filters}...")
-            tic = time()
-            quantized_chan_filter_list = self._quantize_filter2D(
-                layer_idx, filter_idx, wX_patch_tensor, qX_patch_tensor, rad
-            )
-            # Now we need to stack all the channel information together again.
-            quantized_filter = zeros((filter_shape[0], filter_shape[1], num_channels))
-            for channel_filter in quantized_chan_filter_list:
-                channel_idx = channel_filter.channel_idx
-                quantized_filter[:, :, channel_idx] = channel_filter.q_filtr
+            # Open hdf5 file object for reading.
+        with h5py.File(f"layer{layer_idx}_patch_tensors.h5", 'r') as hf:
 
-            Q[:, :, :, filter_idx] = quantized_filter
+            for filter_idx in range(num_filters):
+                super()._log(f"\tQuantizing filter {filter_idx} of {num_filters}...")
+                tic = time()
+                quantized_chan_filter_list = self._quantize_filter2D(
+                    layer_idx, filter_idx, hf, rad
+                )
+                # Now we need to stack all the channel information together again.
+                quantized_filter = zeros((filter_shape[0], filter_shape[1], num_channels))
+                for channel_filter in quantized_chan_filter_list:
+                    channel_idx = channel_filter.channel_idx
+                    quantized_filter[:, :, channel_idx] = channel_filter.q_filtr
 
-            super()._log(f"\tdone. {time() - tic:.2f} seconds.")
+                Q[:, :, :, filter_idx] = quantized_filter
+
+                super()._log(f"\tdone. {time() - tic:.2f} seconds.")
 
         super()._update_weights(layer_idx, Q)
+
+        # Now delete the hdf5 file.
+        os.remove(f"./layer{layer_idx}_patch_tensors.h5")
 
     def quantize_network(self):
 
