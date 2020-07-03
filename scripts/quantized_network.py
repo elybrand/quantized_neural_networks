@@ -511,6 +511,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                 wX_patch_tensor = zeros((*seg_data[0].shape, num_channels))
                 qX_patch_tensor = zeros(wX_patch_tensor.shape)
 
+            # TODO: consider storing these tensors in hdf5 format. Make sure they're column ordered, or if need be
+            # transpose the slices in the tensor. Remember: you want one seek, one read per slice.
             wX_patch_tensor[:, :, channel_idx] = seg_data.wX_seg
             qX_patch_tensor[:, :, channel_idx] = seg_data.qX_seg
 
