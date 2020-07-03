@@ -30,7 +30,7 @@ mkdir(serialized_model_dir)
 
 pretrained_model = ['experiment_2020-06-30_09:48:23.517400/Sequential2020-07-01_00:56:47.573179']
 data_sets = ["cifar10"]
-q_train_sizes = [25000]
+q_train_sizes = [5000]
 ignore_layers = [[]]
 bits = [np.log2(i) for i in  (3,)]
 alphabet_scalars = [2]
