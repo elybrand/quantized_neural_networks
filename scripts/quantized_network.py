@@ -24,6 +24,7 @@ from itertools import product
 from matplotlib.pyplot import subplots
 from matplotlib.axes import Axes
 from time import time
+import concurrent.futures
 import h5py
 import os
 
@@ -176,13 +177,15 @@ class QuantizedNeuralNetwork:
 
         return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q)
 
-    def _get_layer_data(self, layer_idx: int):
+    def _get_layer_data(self, layer_idx: int, hf=None):
         """Gets the input data for the layer at a given index.
 
         Parameters
         -----------
         layer_idx : int
             Index of the layer.
+        hf: hdf5 File object in write mode.
+            If provided, will write output to hdf5 file instead of returning directly.
 
         Returns
         -------
@@ -217,6 +220,11 @@ class QuantizedNeuralNetwork:
             input_layer = self.trained_net.layers[0]
             input_shape = input_layer.input_shape[1:] if input_layer.input_shape[0] is None else input_layer.input_shape
             batch = zeros((self.batch_size, *input_shape))
+
+            #TODO: Add hf option here. Feed batches of data through rather than all at once. You may want 
+            # to reconsider how much memory you preallocate for batch, wX, and qX.
+            feed_foward_batch_size = 500
+            ctr = 0
             for sample_idx in range(self.batch_size):
                 try:
                     batch[sample_idx, :] = next(self.get_data)
@@ -319,9 +327,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         self.bits = bits
         self.alphabet = linspace(-1, 1, num=int(round(2 ** (bits))))
         self.logger = logger
-
-        # Encodes whether we save the patch tensor as hdf5 files for training a given layer.
-        self.use_hdf5 = [False for layer in network.layers]
 
     def _segment_data2D(
         self, kernel_size: tuple, strides: tuple, padding: str, wX: array, qX: array
@@ -457,16 +462,19 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Returns a list of quantized channel filters.
         """
         num_channels = self.trained_net.layers[layer_idx].input_shape[-1]
-        quantized_chan_filter_list =[
-            self._quantize_channel(
-                layer_idx, 
+        quantized_chan_filter_list = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_channel = {executor.submit(self._quantize_channel, layer_idx, 
                 filter_idx, 
                 channel_idx, 
                 hf, 
-                rad,
-            )
-            for channel_idx in range(num_channels)
-            ]
+                rad,): channel_idx for channel_idx in range(num_channels)}
+            for future in concurrent.futures.as_completed(future_to_channel):
+                channel_idx = future_to_channel[future]
+                try:
+                    quantized_chan_filter_list += [future.result()]
+                except Exception as exc:
+                    super()._log(f'Channel {channel_idx} generated an exception: {exc}')
 
         return quantized_chan_filter_list
 
@@ -531,15 +539,18 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
         input_shape = self.trained_net.layers[0].input_shape[1:]
 
+        # TODO: You may have to write these to hdf5.
         wX, qX = super()._get_layer_data(layer_idx)
         super()._log("\tBuilding patch tensors...")
 
-                # Create hdf5 file to store patch tensors.
+        # Create hdf5 file to store patch tensors.
         with h5py.File(f"layer{layer_idx}_patch_tensors.h5", 'w') as hf:
             tic = time()
             # This saves the patch tensors to disk, and closes the file object.
             self._get_patch_tensors(filter_shape, strides, padding, wX, qX, hf)
-            print(f"\tdone. {time() - tic:.2f} seconds.")
+            super()._log(f"\tdone. {time() - tic:.2f} seconds.")
+
+        del wX, qX
 
         rad = self.alphabet_scalar * median(abs(W.flatten()))
         Q = zeros(W.shape)
