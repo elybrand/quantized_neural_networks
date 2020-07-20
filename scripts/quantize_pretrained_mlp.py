@@ -10,7 +10,7 @@ from tensorflow.keras.layers import (
     Flatten,
 )
 from tensorflow.keras.initializers import GlorotUniform
-from tensorflow.keras.models import Sequential, clone_model, save_model
+from tensorflow.keras.models import Sequential, clone_model, save_model, load_model
 from tensorflow.keras.datasets import mnist
 from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedNeuralNetwork
@@ -19,150 +19,58 @@ from os import mkdir
 from itertools import chain
 
 # Write logs to file and to stdout. Overwrite previous log file.
-fh = logging.FileHandler("../train_logs/model_training.log", mode="w+")
+fh = logging.FileHandler("../train_logs/model_quantizing.log", mode="w+")
 fh.setLevel(logging.INFO)
 sh = logging.StreamHandler(stream=stdout)
 sh.setLevel(logging.INFO)
+
 # Only use the logger in this module.
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)
 logger.addHandler(fh)
 logger.addHandler(sh)
 
-# Make a directory to store serialized models.
-timestamp = str(pd.Timestamp.now())
-serialized_model_dir = f"../serialized_models/".replace(" ", "_")
-mkdir(serialized_model_dir)
-
-# Here are all the parameters we iterate over. Don't go too crazy here.
-
-
+# Set the parameters for model quantization.
 quant_train_size = 25000
-
 data_sets = ["mnist"]
-np_seeds = [0]
-tf_seeds = [0]
-layer_widths = [(500, 300)]
-rectifiers = ["relu"]
-kernel_inits = [GlorotUniform]
-train_batch_sizes = [128]
-epochs = [100]
-ignore_layers = [[]]
-retrain_tries = [1]
-retrain_init = ["greedy"]
 bits = [np.log2(i) for i in (3,)]
 alphabet_scalars = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
+# Make an iterable parameter grid.
 parameter_grid = product(
     data_sets,
-    np_seeds,
-    tf_seeds,
-    layer_widths,
-    rectifiers,
-    kernel_inits,
-    train_batch_sizes,
-    epochs,
-    ignore_layers,
-    retrain_tries,
-    retrain_init,
     bits,
     alphabet_scalars,
 )
-
-ParamConfig = namedtuple(
-    "ParamConfig",
-    "data_set, np_seed, tf_seed, layer_widths, rectifier, kernel_init, "
-    "train_batch_size, epochs, ignore_layers, retrain_tries, "
-    "retrain_init, bits, alphabet_scalar",
-)
+ParamConfig = namedtuple("ParamConfig", "data_set, bits, alphabet_scalar")
 param_iterable = (ParamConfig(*config) for config in parameter_grid)
 
-# Build a data frame to keep track of each trial's metrics.
-model_metrics = pd.DataFrame(
-    {
-        "data_set": [],
-        "np_seed": [],
-        "tf_seed": [],
-        "serialized_model": [],
-        "kernels_per_layer": [],
-        "rectifier": [],
-        "kernel_init": [],
-        "conv_kernel_sizes": [],
-        "conv_strides": [],
-        "dropout_rates": [],
-        "pool_sizes": [],
-        "pool_strides": [],
-        "train_batch_size": [],
-        "epochs": [],
-        "q_train_size": [],
-        "ignore_layers": [],
-        "retrain_tries": [],
-        "retrain_init": [],
-        "bits": [],
-        "alphabet_scalar": [],
-        "analog_test_acc": [],
-        "sd_test_acc": [],
-        "msq_test_acc": [],
-    },
-    index=[],
-)
-
-# Set the random seeds for numpy and tensorflow.
-set_seed(0)
-np.random.seed(0)
+# Load analog model
+analog_model = "MNIST_Sequential2020-07-14_112220282408"
+model = load_model(f"../serialized_models/{analog_model}")
 
 # Split training from testing
 train, test = mnist.load_data()
 train_size = train[0].shape[0]
 
-# Split labels from data. Use one-hot encoding for labels.
+# Split labels from data. 
 X_train, y_train = train
 X_test, y_test = test
 
+# Use one-hot encoding for labels.
 num_classes = np.unique(y_train).shape[0]
 y_train = to_categorical(y_train, num_classes)
 y_test = to_categorical(y_test, num_classes)
 
-
-model = Sequential()
-model.add(Flatten(input_shape=X_train[0].shape,))
-for layer_idx, layer_width in enumerate(layer_widths[0]):
-    model.add(
-        Dense(
-            layer_width,
-            activation="relu",
-            kernel_initializer=GlorotUniform(),
-            use_bias=True,
-        )
-    )
-    model.add(BatchNormalization())
-
-model.add(Dense(num_classes, activation="softmax"))
-
-model.compile(
-    optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"]
-)
-
-history = model.fit(
-    X_train,
-    y_train,
-    batch_size=128,
-    epochs=100,
-    verbose=True,
-    validation_split=0.20,
-)
-
-analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
-logger.info(f"Analog model test accuracy = {analog_accuracy:.2f}")
-
-model_timestamp = str(pd.Timestamp.now()).replace(" ", "_")
-model_name = model.__class__.__name__ + str(pd.Timestamp.now()).replace(" ", "_")
-save_model(model, f"{serialized_model_dir}/MNIST_{model_name}")
-
 def train_network(parameters: ParamConfig) -> pd.DataFrame:
 
+    _, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
+
+    # Determine how many layers you need to quantize.
+    num_layers = sum([layer.__class__.__name__ in ('Dense',) for layer in model.layers])
+
     get_data = (sample for sample in X_train[0:quant_train_size])
-    for i in range(len(parameters.layer_widths) + 1):
+    for i in range(num_layers):
         # Chain together iterators over the entire training set. This is so each layer uses
         # the entire training data.
         get_data = chain(get_data, (sample for sample in X_train[0:quant_train_size]))
@@ -174,7 +82,6 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         logger=logger,
         bits=parameters.bits,
         alphabet_scalar=parameters.alphabet_scalar,
-        ignore_layers=parameters.ignore_layers,
     )
 
     my_quant_net.quantize_network()
@@ -182,7 +89,12 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
-    q_loss, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose=True)
+    _, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose=True)
+
+    # Serialize the greedy network.
+    model_timestamp = str(pd.Timestamp.now()).replace(" ", "_").replace(":","").replace(".","")
+    model_name = f"quantized_mnist_scaler{parameters.alphabet_scalar}_{model_timestamp}"
+    save_model(my_quant_net.quantized_net, f"../quantized_models/{model_name}")
 
     # Construct MSQ Net.
     MSQ_model = clone_model(model)
@@ -191,7 +103,6 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     for layer_idx, layer in enumerate(model.layers):
         if (
             layer.__class__.__name__ in ("Dense", "Conv2D")
-            and layer_idx not in parameters.ignore_layers
         ):
             # Use the same radius as the alphabet in the corresponding layer of the Sigma Delta network.
             rad = max(
@@ -206,22 +117,14 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     MSQ_model.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
-    MSQ_loss, MSQ_accuracy = MSQ_model.evaluate(X_test, y_test, verbose=True)
+    _, MSQ_accuracy = MSQ_model.evaluate(X_test, y_test, verbose=True)
 
     trial_metrics = pd.DataFrame(
         {
             "data_set": parameters.data_set,
-            "np_seed": parameters.np_seed,
-            "tf_seed": parameters.tf_seed,
-            "serialized_model": model_name,
-            "layer_widths": [parameters.layer_widths],
-            "rectifier": parameters.rectifier,
-            "train_batch_size": parameters.train_batch_size,
-            "epochs": parameters.epochs,
+            "analog_model": analog_model,
+            "serialized_quantized_model": model_name,
             "q_train_size": batch_size,
-            "ignore_layers": [parameters.ignore_layers],
-            "retrain_tries": parameters.retrain_tries,
-            "retrain_init": parameters.retrain_init,
             "bits": parameters.bits,
             "alphabet_scalar": parameters.alphabet_scalar,
             "analog_test_acc": analog_accuracy,
@@ -237,17 +140,13 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
 if __name__ == "__main__":
 
     # Store results in csv file.
+    timestamp = str(pd.Timestamp.now()).replace(" ", "_").replace(":","").replace(".","")
     file_name = data_sets[0] + "_model_metrics_" + timestamp
     # Timestamp adds a space. Replace it with _
     file_name = file_name.replace(" ", "_")
 
     for idx, params in enumerate(param_iterable):
         trial_metrics = train_network(params)
-
-        if trial_metrics is None:
-            # Skip this configuration. It's inconsistent.
-            continue
-
         if idx == 0:
             # add the header
             trial_metrics.to_csv(f"../model_metrics/{file_name}.csv", mode="a")

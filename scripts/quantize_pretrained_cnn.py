@@ -32,8 +32,8 @@ pretrained_model = ['experiment_2020-06-30_09:48:23.517400/Sequential2020-07-01_
 data_sets = ["cifar10"]
 q_train_sizes = [5000]
 ignore_layers = [[]]
-bits = [np.log2(i) for i in  (3,)]
-alphabet_scalars = [2]
+bits = [np.log2(i) for i in  (3, 4, 8, 16)]
+alphabet_scalars = [2, 3, 4]
 
 parameter_grid = product(
     pretrained_model,
@@ -142,6 +142,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
             "q_train_size": parameters.q_train_size,
             "ignore_layers": [parameters.ignore_layers],
             "bits": parameters.bits,
+            "alphabet_scalar": parameters.alphabet_scalar,
             "analog_test_acc": analog_accuracy,
             "sd_test_acc": q_accuracy,
             "msq_test_acc": MSQ_accuracy,

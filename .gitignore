@@ -4,4 +4,5 @@
 __pycache__/
 quant_net_exploratory.py
 train_logs
-serialized_models
+serialized_models/
+quantized_models/
