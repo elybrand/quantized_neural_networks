@@ -33,7 +33,7 @@ data_sets = ["cifar10"]
 q_train_sizes = [5000]
 ignore_layers = [[]]
 bits = [np.log2(i) for i in  (3, 4, 8, 16)]
-alphabet_scalars = [2, 3, 4]
+alphabet_scalars = [2, 3, 4, 5, 6]
 
 parameter_grid = product(
     pretrained_model,
