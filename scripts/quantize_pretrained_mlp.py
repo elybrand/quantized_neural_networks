@@ -14,7 +14,7 @@ from tensorflow.keras.models import Sequential, clone_model, save_model, load_mo
 from tensorflow.keras.datasets import mnist
 from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedNeuralNetwork
-from sys import stdout
+from sys import stdout, argv
 from os import mkdir
 from itertools import chain
 
@@ -45,8 +45,8 @@ parameter_grid = product(
 ParamConfig = namedtuple("ParamConfig", "data_set, bits, alphabet_scalar")
 param_iterable = (ParamConfig(*config) for config in parameter_grid)
 
-# Load analog model
-analog_model = "MNIST_Sequential2020-07-14_112220282408"
+# Load analog model from command line argument
+analog_model = argv[1]
 model = load_model(f"../serialized_models/{analog_model}")
 
 # Split training from testing
