@@ -9,7 +9,7 @@ from tensorflow.keras.datasets import mnist, cifar10
 from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedCNN
 from itertools import chain
-from sys import stdout
+from sys import stdout, argv
 from os import mkdir
 
 # Write logs to file and to stdout. Overwrite previous log file.
@@ -28,7 +28,8 @@ timestamp = str(pd.Timestamp.now())
 serialized_model_dir = f"../quantized_models/experiment_{timestamp}".replace(" ", "_")
 mkdir(serialized_model_dir)
 
-pretrained_model = ['experiment_2020-06-30_09:48:23.517400/Sequential2020-07-01_00:56:47.573179']
+# Grab the pretrained model name
+pretrained_model = [argv[1]]
 data_sets = ["cifar10"]
 q_train_sizes = [5000]
 ignore_layers = [[]]
@@ -80,7 +81,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     input_shape = X_train[0].shape
 
     # Load the model.
-    model = load_model(f'/Users/elybrandadmin/Desktop/quantized_neural_networks/serialized_models/{parameters.pretrained_model}')
+    model = load_model(f'../serialized_models/{parameters.pretrained_model}')
     analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
     logger.info(f"Analog network test accuracy = {analog_accuracy:.2f}")
 
