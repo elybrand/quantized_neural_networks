@@ -9,3 +9,8 @@ quantized_models/
 imgs/first_layer_analysis/
 imgs/hidden_layer_analysis/
 scripts/exploratory_analysis.nb
+scripts/custom_perceptron.py
+scripts/experiments.py
+scripts/mlp_plots.py
+scripts/mnist_perceptron.py
+scripts/test_quantized_neural_network.py
