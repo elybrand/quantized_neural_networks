@@ -24,6 +24,8 @@ Importantly, to use Docker volumes you need to specify the absolute path to the 
 
 **NOTE**: The `-d` flag will run the docker container in the background, so you won't see any output onto the command line during model training. If you want to track the model training progress in real-time, you can replace the `-dit` flag with `-it`. This runs the docker container in attached mode. You will see the verbose output from the Keras training in your terminal. 
 
+**NOTE**: The analog CIFAR10 network we used in our experiments is included in `serialized_models` if you don't want to train your own network. 
+
 ### Network Compression
 Once you have a pretrained network saved in `serialized_models` you're ready to run the network quantization script. Both model quantization scripts `quantize_pretrained_mlp.py` and `quantize_pretrained_cnn.py` define parameter grids at the top of their respective python files which they cross-validate over. Those parameter grids include:
 1. choices for the number of training data to be used to learn the quantization,
@@ -51,6 +53,8 @@ While the quantization script is running, it will log the progress of the quanti
 **NOTE**: Running the quantization script for both MNIST and CIFAR10 networks takes a while because of the number of parameters to cross-validate over. For the MNIST data set, we also use half the training set (25000 images) which is far more than is needed to get a competitive quantization, and the layers are fairly wide.  On my machine, it only takes about 2 seconds to quantize a hidden unit in the first layer and the entire MNIST quantization script took 4 hours to run. The CIFAR10 network takes some time because the network is deep-ish, and the code requires OS calls to save the output of previous layers to disk so we don't run out of RAM. One round of quantization with a fixed parameter configuration takes about 2 hours for CIFAR10. The code could be modified to quantize the kernels/hidden units for a given layer in parallel, but I'm not paid enough as a grad student to optimize this code.
 
 **NOTE**: As before, remove the `-d` flag if you want to track the model quantization progress in real-time. I don't recommend that you do since all of the activity is logged and you can also look at the .csv file to see the performance of the freshly quantized networks.
+
+**NOTE**: If you don't want to run the entire CIFAR10 quantization script, I've included the quantized versions of the network in `quantized_models/experiment_2020-08-10_15/35/01.024022/`.
 
 ## Model Plots and Figures
 
