@@ -3,9 +3,6 @@
 "Icon\r"
 __pycache__/
 quant_net_exploratory.py
-train_logs
-serialized_models/
-quantized_models/
 imgs/first_layer_analysis/
 imgs/hidden_layer_analysis/
 scripts/exploratory_analysis.nb
