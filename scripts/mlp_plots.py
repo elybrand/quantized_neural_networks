@@ -46,6 +46,10 @@ input_shape = X_test[0].shape
 model = load_model(f'/Users/elybrandadmin/Desktop/quantized_neural_networks/serialized_models/MNIST_Sequential2020-07-14_112220282408')
 analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
 
+# Load the best greedy quantized network
+greedy_model = load_model(f'/Users/elybrandadmin/Desktop/quantized_neural_networks/quantized_models/quantized_mnist_scaler3_2020-07-15_125211560640')
+q_loss, q_accuracy = greedy_model.evaluate(X_test, y_test, verbose=True)
+
 # Load the model metrics
 df = pd.read_csv("../model_metrics/mnist_model_metrics_2020-07-15_121741452415.csv")
 
@@ -63,9 +67,6 @@ ax.set_yticks(np.arange(0,1.1,0.1))
 ax.tick_params(axis='x', labelsize=16)
 ax.tick_params(axis='y', labelsize=16)
 
-# Load the best greedy quantized network
-greedy_model = load_model(f'/Users/elybrandadmin/Desktop/quantized_neural_networks/quantized_models/quantized_mnist_scaler3_2020-07-15_125211560640')
-q_loss, q_accuracy = greedy_model.evaluate(X_test, y_test, verbose=True)
 
 # Grab the best alphabet scalar for MSQ
 MSQ_scalar = df.loc[df['msq_test_acc'] == max(df['msq_test_acc'])]['alphabet_scalar'].values[0]
