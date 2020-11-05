@@ -2,8 +2,10 @@
 
 This repository contains code for the experiments in the manuscript "[A Greedy Algorithm for Quantizing Neural Networks](https://arxiv.org/abs/2010.15979)" by Eric Lybrand and Rayan Saab (2020). These experiments include training and quantizing two networks: a multilayer perceptron to classify MNIST digits, and a convolutional neural network to classify CIFAR10 images. 
 
-## Setting Up Docker Image
+## Setting Up Docker
 To run the code in a docker container, you'll first need to download [Docker](https://www.docker.com/get-started). Once you've got Docker installed, navigate to the github repo on your machine and run the following CLI command: `docker build --tag quant_nnets .` (don't forget the period). This will build a docker image with the anaconda3 base image and download other required python packages from `requirements.txt`. This is a rather large docker image, so it may take a minute or two to build. To see that the docker image has built successefully, run the command `docker images` and look for `quant_nnets` under the Repository column.
+
+Another thing you'll have to do is to modify how much memory Docker Desktop is allotted. In Docker Destop, navigate to "Resources", then to "Advanced". I was able to run the scripts with 16GB memory allottment (half of my machine's RAM). This may be overkill, but I didn't bother to fine tune. Also, for the CIFAR10 quantization script the disk pressure will get up to ~30GB, so make sure you have that much space on disk for this experiment.
 
 ## Running Experiments
 Once the image is built, you can start running the experiments. These experiments are set up so that model training and model compression occur in two separate scripts. Once we have a trained network, that network is saved in the directory `serialized_models`. To persist that trained model on your local machine, we'll use Docker volumes.
@@ -46,13 +48,33 @@ While the quantization script is running, it will log the progress of the quanti
 1. the parameters for that quantization and the test accuracies of the analog and quantized networks will be written to a .csv file in `model_metrics/`. This .csv file will store the results of all of the quantizations from one call to the script.
 2. the quantized model will be serialized into the directory `quantized_models/`.
 
-**NOTE**: Running the quantization script for both MNIST and CIFAR10 networks takes a while because of the number of parameters to cross-validate over. For the MNIST data set, we also use half the training set (25000 images) which is far more than is needed to get a competitive quantization, and the layers are fairly wide.  On my machine, it only takes about 2 seconds to quantize a hidden unit in the first layer and the entire MNIST quantization script took 4 hours to run. The CIFAR10 network takes some time because the network is deep-ish, and the code requires OS calls to save the output of previous layers to disk so we don't run out of RAM. The code could be modified to quantize the kernels/hidden units for a given layer in parallel, but I'm not paid enough as a grad student to optimize this code.
+**NOTE**: Running the quantization script for both MNIST and CIFAR10 networks takes a while because of the number of parameters to cross-validate over. For the MNIST data set, we also use half the training set (25000 images) which is far more than is needed to get a competitive quantization, and the layers are fairly wide.  On my machine, it only takes about 2 seconds to quantize a hidden unit in the first layer and the entire MNIST quantization script took 4 hours to run. The CIFAR10 network takes some time because the network is deep-ish, and the code requires OS calls to save the output of previous layers to disk so we don't run out of RAM. One round of quantization with a fixed parameter configuration takes about 2 hours for CIFAR10. The code could be modified to quantize the kernels/hidden units for a given layer in parallel, but I'm not paid enough as a grad student to optimize this code.
 
 **NOTE**: As before, remove the `-d` flag if you want to track the model quantization progress in real-time. I don't recommend that you do since all of the activity is logged and you can also look at the .csv file to see the performance of the freshly quantized networks.
 
 ## Model Plots and Figures
 
 In the paper we show diagnostic plots for how the test accuracy behaves as each layer is quantized and the remaining layers are unquantized. We also show plots of how the test accuracy behaves as a function of the alphabet radius, and we histogram the weights for particular layers. All of the code for those plots are in `mlp_plots.py` and `cnn_plots.py`. 
+
+## Minimal Working Example
+
+Let's suppose I want to run the MNIST experiment. First, I'll train a network by calling the command 
+```
+docker run -dit --name train_container \
+                -v /Users/elybrandadmin/Desktop/quantized_neural_networks/serialized_models:/serialized_models \
+                -v /Users/elybrandadmin/Desktop/quantized_neural_networks/train_logs:/train_logs \
+           quant_nnets python train_mnist_mlp.py
+```
+Once this script is done, it will serialize the MNIST network to `serialized_models/MNIST_Sequential2020-11-03_211410051651`. To quantize this network and cross-validate over the quantization parameters, I'll then execute the command
+```
+docker run -dit --name quant_container \
+                -v /Users/elybrandadmin/Desktop/quantized_neural_networks/serialized_models:/serialized_models \
+                -v /Users/elybrandadmin/Desktop/quantized_neural_networks/quantized_models:/quantized_models \
+                -v /Users/elybrandadmin/Desktop/quantized_neural_networks/train_logs:/train_logs \
+                -v /Users/elybrandadmin/Desktop/quantized_neural_networks/model_metrics:/model_metrics \
+           quant_nnets python quantize_pretrained_mlp.py MNIST_Sequential2020-11-03_211410051651
+```
+As the script finishes quantizing the pre-trained analog network with a fixed bit-budget and alphabet radius, it logs the results of the quantized network's performance in `model_metrics/mnist_model_metrics_2020-11-03_211659124462.csv`. That's it!
 
 # Appendix: Behind the Code
 All of the work is done in `scripts/quantized_network.py`. Inside this file are two wrapper classes for Tensorflow networks. The `QuantizedNeuralNetwork` class handles networks with `Dense` layers. Any layer that is not a `Dense` layer is ignored. The `QuantizedCNN` class inherits the functionality of `QuantizedNeuralNetwork` and extends its functionality to handle quantizing `Conv2D` layers. Any layers that are not `Dense` or `Conv2D` are ignored. 
