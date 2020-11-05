@@ -54,7 +54,7 @@ While the quantization script is running, it will log the progress of the quanti
 
 ## Model Plots and Figures
 
-In the paper we show diagnostic plots for how the test accuracy behaves as each layer is quantized and the remaining layers are unquantized. We also show plots of how the test accuracy behaves as a function of the alphabet radius, and we histogram the weights for particular layers. All of the code for those plots are in `mlp_plots.py` and `cnn_plots.py`. 
+In the paper we show diagnostic plots for how the test accuracy behaves as each layer is quantized and the remaining layers are unquantized. We also show plots of how the test accuracy behaves as a function of the alphabet radius, and we histogram the weights for particular layers. All of the code for those plots are in `mlp_plots.py` and `cnn_plots.py`. I didn't intend for these files to be run as scripts, so you'll need to go in and manually change which models to look at and what model metrics .csv file to pull from.
 
 ## Minimal Working Example
 
