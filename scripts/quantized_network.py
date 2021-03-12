@@ -196,9 +196,27 @@ class QuantizedNeuralNetwork:
 
         layer = self.trained_net.layers[layer_idx]
         layer_data_shape = layer.input_shape[1:] if layer.input_shape[0] is None else layer.input_shape
-        wX = zeros((self.batch_size, *layer_data_shape))
-        qX = zeros((self.batch_size, *layer_data_shape))
+
+        # Retrieve a batch of data.
+        # TODO: Add hf option here. Feed batches of data through rather than all at once. You may want 
+        # to reconsider how much memory you preallocate for batch, wX, and qX.
+        input_analog_layer = self.trained_net.layers[0]
+        input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
+        batch = zeros((self.batch_size, *input_shape))
+
+        feed_foward_batch_size = 500
+        ctr = 0
+        for sample_idx in range(self.batch_size):
+            try:
+                batch[sample_idx, :] = next(self.get_data)
+            except StopIteration:
+                # No more samples!
+                break
+
         if layer_idx == 0:
+            # Don't need to feed data through hidden layers, so just retrieve the raw data.
+            wX = zeros((self.batch_size, *layer_data_shape))
+            qX = zeros((self.batch_size, *layer_data_shape))
             for sample_idx in range(self.batch_size):
                 try:
                     wX[sample_idx, :] = next(self.get_data)
@@ -207,33 +225,52 @@ class QuantizedNeuralNetwork:
                     break
             qX = wX
         else:
-            # Define functions which will give you the output of the previous hidden layer
-            # for both networks.
-            prev_trained_output = Kfunction(
-                [self.trained_net.layers[0].input],
-                [self.trained_net.layers[layer_idx - 1].output],
-            )
-            prev_quant_output = Kfunction(
+            # Determine whether there is more than one input layer
+            inbound_analog_nodes = self.trained_net.layers[layer_idx].inbound_nodes
+            if len(inbound_analog_nodes) > 1:
+                print(f"Number of inbound analog nodes = {inbound_analog_nodes}...not sure what to do here!")
+            else:
+                inbound_analog_layers = inbound_analog_nodes[0].inbound_layers
+
+            inbound_quant_nodes = self.quantized_net.layers[layer_idx].inbound_nodes
+            if len(inbound_quant_nodes) > 1:
+                print(f"Number of inbound quantized nodes = {inbound_quant_nodes}...not sure what to do here!")
+            else:
+                inbound_quant_layers = inbound_quant_nodes[0].inbound_layers
+
+            # Sanity check that the two networks have the same number of inbound layers
+            try:
+                assert(len(inbound_analog_layers) == len(inbound_quant_layers))
+            except TypeError: 
+                # inbound_*_layers is a layer object, not a list
+                inbound_analog_layers = [inbound_analog_layers]
+                inbound_quant_layers = [inbound_quant_layers]
+
+            num_inbound_layers = len(inbound_analog_layers)
+            wX = zeros((num_inbound_layers*self.batch_size, *layer_data_shape))
+            qX = zeros((num_inbound_layers*self.batch_size, *layer_data_shape))
+
+            # For every inbound layer, get the output from passing through that inbound layer
+            for inbound_layer_idx in range(num_inbound_layers):
+                analog_layer = inbound_analog_layers[inbound_layer_idx]
+                quant_layer = inbound_quant_layers[inbound_layer_idx]
+
+                # Define functions which will give you the output of the previous hidden layer
+                # for both networks.
+                prev_trained_output = Kfunction(
+                    [input_analog_layer.input],
+                    [analog_layer.output],
+                )
+                prev_quant_output = Kfunction(
                 [self.quantized_net.layers[0].input],
-                [self.quantized_net.layers[layer_idx - 1].output],
-            )
-            input_layer = self.trained_net.layers[0]
-            input_shape = input_layer.input_shape[1:] if input_layer.input_shape[0] is None else input_layer.input_shape
-            batch = zeros((self.batch_size, *input_shape))
+                [quant_layer.output],
+                )
 
-            #TODO: Add hf option here. Feed batches of data through rather than all at once. You may want 
-            # to reconsider how much memory you preallocate for batch, wX, and qX.
-            feed_foward_batch_size = 500
-            ctr = 0
-            for sample_idx in range(self.batch_size):
-                try:
-                    batch[sample_idx, :] = next(self.get_data)
-                except StopIteration:
-                    # No more samples!
-                    break
+                # breakpoint()
 
-            wX = prev_trained_output([batch])[0]
-            qX = prev_quant_output([batch])[0]
+                # Collect the output data
+                wX[inbound_layer_idx*self.batch_size:(inbound_layer_idx+1)*self.batch_size] = prev_trained_output([batch])[0]
+                qX[inbound_layer_idx*self.batch_size:(inbound_layer_idx+1)*self.batch_size] = prev_quant_output([batch])[0]
 
         return (wX, qX)
 
