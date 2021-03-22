@@ -588,6 +588,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             super()._log(f"\tdone. {time() - tic:.2f} seconds.")
 
         del wX, qX
+        #TODO: force call garbage collection here?
 
         rad = self.alphabet_scalar * median(abs(W.flatten()))
         Q = zeros(W.shape)
