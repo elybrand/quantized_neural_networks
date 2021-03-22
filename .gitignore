@@ -10,3 +10,4 @@ scripts/custom_perceptron.py
 scripts/experiments.py
 scripts/mnist_perceptron.py
 scripts/test_quantized_neural_network.py
+train_logs/
