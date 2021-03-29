@@ -21,18 +21,103 @@ from tensorflow.image import extract_patches
 from typing import List, Generator
 from collections import namedtuple
 from itertools import product
-from matplotlib.pyplot import subplots
-from matplotlib.axes import Axes
 from time import time
 import concurrent.futures
 import h5py
 import os
 
+# Define namedtuples for more interpretable return types.
 QuantizedNeuron = namedtuple("QuantizedNeuron", ["layer_idx", "neuron_idx", "q"])
 QuantizedFilter = namedtuple(
     "QuantizedFilter", ["layer_idx", "filter_idx", "channel_idx", "q_filtr"]
 )
 SegmentedData = namedtuple("SegmentedData", ["wX_seg", "qX_seg"])
+
+# Define static functions to use for multiprocessing
+def _bit_round_parallel(t: float, alphabet: array) -> float:
+    """Rounds a quantity to the nearest atom in the (scaled) quantization alphabet.
+
+    Parameters
+    -----------
+    t : float
+        The value to quantize.
+    alphabet : array
+        Scalar quantization alphabet.
+
+    Returns
+    -------
+    bit : float
+        The quantized value.
+    """
+
+    # Scale the alphabet appropriately.
+    return alphabet[argmin(abs(alphabet - t))]
+
+def _quantize_weight_parallel(
+    w: float, u: array, X: array, X_tilde: array, alphabet: array
+) -> float:
+    """Quantizes a single weight of a neuron.
+
+    Parameters
+    -----------
+    w : float
+        The weight.
+    u : array ,
+        Residual vector.
+    X : array
+        Vector from the analog network's random walk.
+    X_tilde : array
+        Vector from the quantized network's random walk.
+    alphabet : array
+        Scalar quantization alphabet.
+
+    Returns
+    -------
+    bit : float
+        The quantized value.
+    """
+
+    if norm(X_tilde, 2) < 10 ** (-16):
+        return 0
+
+    if abs(dot(X_tilde, u)) < 10 ** (-10):
+        return _bit_round_parallel(w, alphabet)
+
+    return _bit_round_parallel(dot(X_tilde, u + w * X) / (norm(X_tilde, 2) ** 2), alphabet)
+
+def _quantize_neuron_parallel(
+    w: array,
+    wX: array,
+    qX: array,
+    alphabet: array,
+) -> array:
+    """Quantizes a single neuron in a Dense layer.
+
+    Parameters
+    -----------
+    w: array
+        The neuron to be quantized.
+    wX : array
+        Layer input for the analog convolutional neural network.
+    qX : array
+        Layer input for the quantized convolutional neural network.
+    alphabet : array
+        Scalar quantization alphabet
+
+    Returns
+    -------
+    QuantizedNeuron: NamedTuple
+        A tuple with the layer and neuron index, as well as the quantized neuron.
+    """
+
+    N_ell = wX.shape[1]
+    u = zeros(wX.shape[0])
+    q = zeros(N_ell)
+    for t in range(N_ell):
+        q[t] = _quantize_weight_parallel(w[t], u, wX[:, t], qX[:, t], alphabet)
+        u += w[t] * wX[:, t] - q[t] * qX[:, t]
+
+    return q
 
 
 class QuantizedNeuralNetwork:
@@ -257,8 +342,6 @@ class QuantizedNeuralNetwork:
                 [quant_layer.output],
                 )
 
-                # breakpoint()
-
                 # Collect the output data
                 wX[inbound_layer_idx*self.batch_size:(inbound_layer_idx+1)*self.batch_size] = prev_trained_output([batch])[0]
                 qX[inbound_layer_idx*self.batch_size:(inbound_layer_idx+1)*self.batch_size] = prev_quant_output([batch])[0]
@@ -313,6 +396,46 @@ class QuantizedNeuralNetwork:
 
             self._update_weights(layer_idx, Q)
 
+    def _quantize_layer_parallel(self, layer_idx: int):
+        """Quantizes a Dense layer of a multi-layer perceptron.
+
+        Parameters
+        -----------
+        layer_idx : int
+            Index of the Dense layer.
+        """
+
+        W = self.trained_net.layers[layer_idx].get_weights()[0]
+        N_ell, N_ell_plus_1 = W.shape
+        # Placeholder for the weight matrix in the quantized network.
+        Q = zeros(W.shape)
+        N_ell_plus_1 = W.shape[1]
+        wX, qX = self._get_layer_data(layer_idx)
+
+        # Set the radius of the alphabet.
+        rad = self.alphabet_scalar * median(abs(W.flatten()))
+        layer_alphabet = rad*self.alphabet
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            # Build a dictionary with (key, value) = (QuantizedNeuron, neuron_idx). This will
+            # help us map quantized neurons to the correct neuron index as we call
+            # _quantize_neuron asynchronously.
+            future_to_neuron = {executor.submit(_quantize_neuron_parallel, W[:, neuron_idx], 
+                wX,
+                qX,
+                layer_alphabet,
+                ): neuron_idx for neuron_idx in range(N_ell_plus_1)}
+            # TODO: I get deadlock here. I wonder if the executor is shutdown once the dictionary is formed?
+            breakpoint()
+            for future in concurrent.futures.as_completed(future_to_neuron):
+                neuron_idx = future_to_neuron[future]
+                try:
+                    # Populate the appropriate column in the quantized weight matrix
+                    # with the quantized neuron
+                    Q[:, neuron_idx] = future.result()
+                except Exception as exc:
+                    self._log(f'Neuron {neuron_idx} generated an exception: {exc}')
+
     def quantize_network(self):
         """Quantizes all Dense layers that are not specified by the list of ignored layers."""
 
@@ -325,7 +448,7 @@ class QuantizedNeuralNetwork:
                 # Only quantize dense layers.
                 self._log(f"Quantizing layer {layer_idx}...")
 
-                self._quantize_layer(layer_idx)
+                self._quantize_layer_parallel(layer_idx)
 
                 self._log(f"done. {layer_idx}...")
 
@@ -584,7 +707,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         rad = self.alphabet_scalar * median(abs(W.flatten()))
         Q = zeros(W.shape)
 
-            # Open hdf5 file object for reading.
+        # Open hdf5 file object for reading.
         with h5py.File(f"layer{layer_idx}_patch_tensors.h5", 'r') as hf:
 
             for filter_idx in range(num_filters):
