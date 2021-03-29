@@ -1,5 +1,6 @@
-# Use anaconda3 base image
-FROM continuumio/anaconda3
+# Use python base image
+#FROM continuumio/anaconda3
+FROM python:3.7.10
 
 # Copy over the requirements for the docker container
 COPY requirements.txt /
