@@ -204,8 +204,6 @@ class QuantizedNeuralNetwork:
         input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
         batch = zeros((self.batch_size, *input_shape))
 
-        feed_foward_batch_size = 500
-        ctr = 0
         for sample_idx in range(self.batch_size):
             try:
                 batch[sample_idx, :] = next(self.get_data)
@@ -214,16 +212,9 @@ class QuantizedNeuralNetwork:
                 break
 
         if layer_idx == 0:
-            # Don't need to feed data through hidden layers, so just retrieve the raw data.
-            wX = zeros((self.batch_size, *layer_data_shape))
-            qX = zeros((self.batch_size, *layer_data_shape))
-            for sample_idx in range(self.batch_size):
-                try:
-                    wX[sample_idx, :] = next(self.get_data)
-                except StopIteration:
-                    # No more samples!
-                    break
-            qX = wX
+            # Don't need to feed data through hidden layers
+            wX = batch
+            qX = batch
         else:
             # Determine whether there is more than one input layer
             inbound_analog_nodes = self.trained_net.layers[layer_idx].inbound_nodes
