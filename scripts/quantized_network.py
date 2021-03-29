@@ -219,13 +219,13 @@ class QuantizedNeuralNetwork:
             # Determine whether there is more than one input layer
             inbound_analog_nodes = self.trained_net.layers[layer_idx].inbound_nodes
             if len(inbound_analog_nodes) > 1:
-                print(f"Number of inbound analog nodes = {inbound_analog_nodes}...not sure what to do here!")
+                self._log(f"Number of inbound analog nodes = {inbound_analog_nodes}...not sure what to do here!")
             else:
                 inbound_analog_layers = inbound_analog_nodes[0].inbound_layers
 
             inbound_quant_nodes = self.quantized_net.layers[layer_idx].inbound_nodes
             if len(inbound_quant_nodes) > 1:
-                print(f"Number of inbound quantized nodes = {inbound_quant_nodes}...not sure what to do here!")
+                self._log(f"Number of inbound quantized nodes = {inbound_quant_nodes}...not sure what to do here!")
             else:
                 inbound_quant_layers = inbound_quant_nodes[0].inbound_layers
 
