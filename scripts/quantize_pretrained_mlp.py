@@ -17,6 +17,7 @@ from quantized_network import QuantizedNeuralNetwork
 from sys import stdout, argv
 from os import mkdir
 from itertools import chain
+from time import time
 
 # Write logs to file and to stdout. Overwrite previous log file.
 fh = logging.FileHandler("../train_logs/model_quantizing.log", mode="w+")
@@ -83,8 +84,9 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
         bits=parameters.bits,
         alphabet_scalar=parameters.alphabet_scalar,
     )
-
+    tic = time()
     my_quant_net.quantize_network()
+    quantization_time = time() - tic
 
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
@@ -130,6 +132,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             "analog_test_acc": analog_accuracy,
             "sd_test_acc": q_accuracy,
             "msq_test_acc": MSQ_accuracy,
+            "quantization_time": quantization_time
         },
         index=[model_timestamp],
     )
