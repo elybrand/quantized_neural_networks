@@ -417,16 +417,18 @@ class QuantizedNeuralNetwork:
         layer_alphabet = rad*self.alphabet
 
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            # Build a dictionary with (key, value) = (QuantizedNeuron, neuron_idx). This will
+            # Build a dictionary with (key, value) = (q, neuron_idx). This will
             # help us map quantized neurons to the correct neuron index as we call
             # _quantize_neuron asynchronously.
+
+            # TODO: maybe you'll see more of a speedup if you pass hdf5 file references to
+            # wX, qX instead of the objects themselves. After all, they have to be serialized and
+            # those may take time to serialize and pass to other CPUs.
             future_to_neuron = {executor.submit(_quantize_neuron_parallel, W[:, neuron_idx], 
                 wX,
                 qX,
                 layer_alphabet,
                 ): neuron_idx for neuron_idx in range(N_ell_plus_1)}
-            # TODO: I get deadlock here. I wonder if the executor is shutdown once the dictionary is formed?
-            breakpoint()
             for future in concurrent.futures.as_completed(future_to_neuron):
                 neuron_idx = future_to_neuron[future]
                 try:
@@ -435,6 +437,11 @@ class QuantizedNeuralNetwork:
                     Q[:, neuron_idx] = future.result()
                 except Exception as exc:
                     self._log(f'Neuron {neuron_idx} generated an exception: {exc}')
+
+                self._log(f'Neuron {neuron_idx} quantized successfully.')
+
+            # Set the weights for the quantized network.
+            self._update_weights(layer_idx, Q)
 
     def quantize_network(self):
         """Quantizes all Dense layers that are not specified by the list of ignored layers."""
@@ -446,11 +453,13 @@ class QuantizedNeuralNetwork:
                 and layer_idx not in self.ignore_layers
             ):
                 # Only quantize dense layers.
-                self._log(f"Quantizing layer {layer_idx}...")
+                self._log(f"Quantizing layer {layer_idx} (in series)...")
+                tic = time()
+                #self._log(f"Quantizing layer {layer_idx} (in parallel)...")
+                # self._quantize_layer_parallel(layer_idx)
+                self._quantize_layer(layer_idx)
 
-                self._quantize_layer_parallel(layer_idx)
-
-                self._log(f"done. {layer_idx}...")
+                self._log(f"done. {time() - tic:.2f} seconds...")
 
 
 class QuantizedCNN(QuantizedNeuralNetwork):
