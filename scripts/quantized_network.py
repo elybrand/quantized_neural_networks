@@ -87,8 +87,7 @@ def _quantize_weight_parallel(
 
 def _quantize_neuron_parallel(
     w: array,
-    wX: array,
-    qX: array,
+    hf_filename: str,
     alphabet: array,
 ) -> array:
     """Quantizes a single neuron in a Dense layer.
@@ -97,10 +96,8 @@ def _quantize_neuron_parallel(
     -----------
     w: array
         The neuron to be quantized.
-    wX : array
-        Layer input for the analog convolutional neural network.
-    qX : array
-        Layer input for the quantized convolutional neural network.
+    hf_filename: str
+        Filename for hdf5 file with datasets wX, qX.
     alphabet : array
         Scalar quantization alphabet
 
@@ -109,13 +106,13 @@ def _quantize_neuron_parallel(
     QuantizedNeuron: NamedTuple
         A tuple with the layer and neuron index, as well as the quantized neuron.
     """
-
-    N_ell = wX.shape[1]
-    u = zeros(wX.shape[0])
-    q = zeros(N_ell)
-    for t in range(N_ell):
-        q[t] = _quantize_weight_parallel(w[t], u, wX[:, t], qX[:, t], alphabet)
-        u += w[t] * wX[:, t] - q[t] * qX[:, t]
+    with h5py.File(hf_filename, 'r') as hf:
+        N_ell = hf['wX'].shape[1]
+        u = zeros(hf['wX'].shape[0])
+        q = zeros(N_ell)
+        for t in range(N_ell):
+            q[t] = _quantize_weight_parallel(w[t], u, hf['wX'][:, t], hf['qX'][:, t], alphabet)
+            u += w[t] * hf['wX'][:, t] - q[t] * hf['qX'][:, t]
 
     return q
 
@@ -262,29 +259,24 @@ class QuantizedNeuralNetwork:
 
         return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q)
 
-    def _get_layer_data(self, layer_idx: int, hf=None):
+    def _get_layer_data(self, layer_idx: int):
         """Gets the input data for the layer at a given index.
 
         Parameters
         -----------
         layer_idx : int
             Index of the layer.
-        hf: hdf5 File object in write mode.
-            If provided, will write output to hdf5 file instead of returning directly.
 
         Returns
         -------
-        tuple: (array, array)
-            A tuple of arrays, with the first entry being the input for the analog network
-            and the latter being the input for the quantized network.
+        hf_filename : str
+            Filename of hdf5 file that contains datasets wX, qX.
         """
 
         layer = self.trained_net.layers[layer_idx]
         layer_data_shape = layer.input_shape[1:] if layer.input_shape[0] is None else layer.input_shape
 
         # Retrieve a batch of data.
-        # TODO: Add hf option here. Feed batches of data through rather than all at once. You may want 
-        # to reconsider how much memory you preallocate for batch, wX, and qX.
         input_analog_layer = self.trained_net.layers[0]
         input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
         batch = zeros((self.batch_size, *input_shape))
@@ -346,7 +338,20 @@ class QuantizedNeuralNetwork:
                 wX[inbound_layer_idx*self.batch_size:(inbound_layer_idx+1)*self.batch_size] = prev_trained_output([batch])[0]
                 qX[inbound_layer_idx*self.batch_size:(inbound_layer_idx+1)*self.batch_size] = prev_quant_output([batch])[0]
 
-        return (wX, qX)
+
+            # Create an hdf5 file with a wX dataset and a qX dataset. Return the filename of this hdf5 file as 
+            # a string.
+            hf_filename = f"layer{layer_idx}_data.h5"
+            with h5py.File(hf_filename, 'w') as hf:
+                # TODO: Store the directions in our random walk as ROWS because it makes accessing
+                # them substantially faster.
+                hf.create_dataset(f"wX", data = wX)
+                hf.create_dataset(f"qX", data = qX)
+
+            # Delete wX, qX to free up memory.
+            del wX, qX
+
+        return hf_filename
 
     def _update_weights(self, layer_idx: int, Q: array):
         """Updates the weights of the quantized neural network given a layer index and
@@ -410,7 +415,11 @@ class QuantizedNeuralNetwork:
         # Placeholder for the weight matrix in the quantized network.
         Q = zeros(W.shape)
         N_ell_plus_1 = W.shape[1]
-        wX, qX = self._get_layer_data(layer_idx)
+
+        # TODO: maybe have it so that the hdf5 file has the feature data as ROWS instead of COLUMNS.
+        # This will give you faster reads, but you'll have to handle the downstream effect on the Conv2D code
+        # which assumes feature data are columns.
+        hf_filename = self._get_layer_data(layer_idx)
 
         # Set the radius of the alphabet.
         rad = self.alphabet_scalar * median(abs(W.flatten()))
@@ -420,13 +429,8 @@ class QuantizedNeuralNetwork:
             # Build a dictionary with (key, value) = (q, neuron_idx). This will
             # help us map quantized neurons to the correct neuron index as we call
             # _quantize_neuron asynchronously.
-
-            # TODO: maybe you'll see more of a speedup if you pass hdf5 file references to
-            # wX, qX instead of the objects themselves. After all, they have to be serialized and
-            # those may take time to serialize and pass to other CPUs.
             future_to_neuron = {executor.submit(_quantize_neuron_parallel, W[:, neuron_idx], 
-                wX,
-                qX,
+                hf_filename,
                 layer_alphabet,
                 ): neuron_idx for neuron_idx in range(N_ell_plus_1)}
             for future in concurrent.futures.as_completed(future_to_neuron):
@@ -443,6 +447,9 @@ class QuantizedNeuralNetwork:
             # Set the weights for the quantized network.
             self._update_weights(layer_idx, Q)
 
+        # Now delete the hdf5 file.
+        os.remove(f"./{hf_filename}")
+
     def quantize_network(self):
         """Quantizes all Dense layers that are not specified by the list of ignored layers."""
 
@@ -453,11 +460,13 @@ class QuantizedNeuralNetwork:
                 and layer_idx not in self.ignore_layers
             ):
                 # Only quantize dense layers.
-                self._log(f"Quantizing layer {layer_idx} (in series)...")
                 tic = time()
-                #self._log(f"Quantizing layer {layer_idx} (in parallel)...")
-                # self._quantize_layer_parallel(layer_idx)
-                self._quantize_layer(layer_idx)
+
+                self._log(f"Quantizing layer {layer_idx} (in parallel)...")
+                self._quantize_layer_parallel(layer_idx)
+
+                # self._log(f"Quantizing layer {layer_idx} (in series)...")
+                # self._quantize_layer(layer_idx)
 
                 self._log(f"done. {time() - tic:.2f} seconds...")
 
@@ -719,6 +728,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # Open hdf5 file object for reading.
         with h5py.File(f"layer{layer_idx}_patch_tensors.h5", 'r') as hf:
 
+            # TODO: multiprocess here. You may need to pass hf as a string of the filename
+            # rather than the file object.
             for filter_idx in range(num_filters):
                 super()._log(f"\tQuantizing filter {filter_idx} of {num_filters}...")
                 tic = time()
