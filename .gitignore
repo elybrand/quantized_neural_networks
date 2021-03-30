@@ -11,3 +11,6 @@ scripts/experiments.py
 scripts/mnist_perceptron.py
 scripts/test_quantized_neural_network.py
 train_logs/*
+serialized_models/
+quantized_models/
+model_metrics/
