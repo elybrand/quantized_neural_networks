@@ -9,6 +9,7 @@ from tensorflow.keras.datasets import mnist, cifar10
 from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedCNN
 from itertools import chain
+from time import time
 from sys import stdout, argv
 from os import mkdir
 
@@ -23,15 +24,10 @@ logger.setLevel(level=logging.INFO)
 logger.addHandler(fh)
 logger.addHandler(sh)
 
-# Make a directory to store serialized models.
-timestamp = str(pd.Timestamp.now())
-serialized_model_dir = f"../quantized_models/experiment_{timestamp}".replace(" ", "_")
-mkdir(serialized_model_dir)
-
 # Grab the pretrained model name
 pretrained_model = [argv[1]]
 data_sets = ["cifar10"]
-q_train_sizes = [10]
+q_train_sizes = [1]
 ignore_layers = [[]]
 bits = [np.log2(i) for i in  (3, 4, 8, 16)]
 alphabet_scalars = [2, 3, 4, 5, 6]
@@ -104,14 +100,18 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         bits=parameters.bits,
         alphabet_scalar=parameters.alphabet_scalar,
     )
+    tic = time()
     my_quant_net.quantize_network()
+    quantization_time = time()-tic
+
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
-    # Save the quantized model.
-    model_timestamp = str(pd.Timestamp.now()).replace(" ", "_")
-    model_name = model.__class__.__name__ + str(pd.Timestamp.now()).replace(" ", "_")
-    save_model(my_quant_net.quantized_net, f"{serialized_model_dir}/Quantized_{model_name}")
+
+    # Serialize the greedy network.
+    model_timestamp = str(pd.Timestamp.now()).replace(" ", "_").replace(":","").replace(".","")
+    model_name = f"quantized_cifar10_scaler{parameters.alphabet_scalar}_{parameters.bits}bits_{model_timestamp}"
+    save_model(my_quant_net.quantized_net, f"../quantized_models/{model_name}")
 
     q_loss, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose=True)
 
@@ -147,6 +147,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
             "analog_test_acc": analog_accuracy,
             "sd_test_acc": q_accuracy,
             "msq_test_acc": MSQ_accuracy,
+            "quantization_time": quantization_time,
         },
         index=[model_timestamp],
     )
@@ -157,9 +158,11 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
 if __name__ == "__main__":
 
     # Store results in csv file.
+    timestamp = str(pd.Timestamp.now()).replace(" ", "_").replace(":","").replace(".","")
     file_name = data_sets[0] + "_model_metrics_" + timestamp
     # Timestamp adds a space. Replace it with _
     file_name = file_name.replace(" ", "_")
+
     for idx, params in enumerate(param_iterable):
         trial_metrics = quantize_network(params)
 
