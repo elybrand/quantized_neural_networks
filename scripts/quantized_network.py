@@ -116,6 +116,107 @@ def _quantize_neuron_parallel(
 
     return q
 
+def _segment_data2D(
+        kernel_size: tuple, strides: tuple, padding: str, channel_wX: array, channel_qX: array
+    ) -> SegmentedData:
+        """Reshapes image tensor data into a 2D tensor. The rows of this 2D tensor are
+        the flattened patches which are the arguments of the convolutions in a Conv2D layer.
+
+        Parameters
+        -----------
+        kernel_size : (int, int)
+            Shape of the kernel for a Conv2D layer.
+        strides : (int, int)
+            Strides of the kernel for a Conv2D layer.
+        padding : string
+            Either 'valid' or 'same', as in docstring for Conv2D layer.
+        channel_wX : 2D array
+            Layer (channel) input for the analog convolutional neural network.
+        channel_qX : 2D array
+            Layer (channel) input for the quantized convolutional neural network.
+
+        Returns
+        -------
+        SegmentedData: NamedTuple(wX_seg, qX_seg)
+            Both wX_seg and qX_seg are 2D tensors whose rows are the flattened patches
+            used in the convolutions of the analog and quantized Conv2D layers, respectively.
+        """
+
+        kernel_sizes_list = [1, kernel_size[0], kernel_size[1], 1]
+        strides_list = [1, strides[0], strides[1], 1]
+        rates = [1, 1, 1, 1]
+
+        wX_seg = extract_patches(
+            images=channel_wX,
+            sizes=kernel_sizes_list,
+            strides=strides_list,
+            rates=rates,
+            padding=padding,
+        )
+        qX_seg = extract_patches(
+            images=channel_qX,
+            sizes=kernel_sizes_list,
+            strides=strides_list,
+            rates=rates,
+            padding=padding,
+        )
+
+        # Reshape tensor data into a 2 tensor, where the patches are vectorized and stored in the rows.
+        new_shape = (wX_seg.shape[0] * wX_seg.shape[1] * wX_seg.shape[2], wX_seg.shape[3])
+        wX_seg = reshape(wX_seg, new_shape)
+        qX_seg = reshape(qX_seg, new_shape)
+
+        return SegmentedData(wX_seg=wX_seg, qX_seg=qX_seg)
+
+def _build_patch_array_parallel(channel_idx: int, kernel_size: tuple, strides: tuple, padding: str, hf_filename: str, patch_hf_filename: str) -> tuple:
+        """Returns a 3D tensor whose first two axes encode the 2D tensor of vectorized
+        patches of images, and the last axis encodes the channel.
+
+        Parameters
+        -----------
+        kernel_size: tuple
+            Tuple of integers encoding the dimensions of the filter/kernel
+        channel_idx: int
+            Index to reference the approproiate channel of the feature data.
+        strides: tuple
+            Tuple of integers encoding the stride information of the filter/kernel
+        padding: string
+            Padding argument for Conv2D layer.
+        hf_filename: str
+            File name for the hdf5 file that contains the wX, qX datasets (transposed). These are the hidden layer
+            data used to learn the quantizations at the current layer.
+        patch_hf_filename: str
+            File name of the h5py file to write the image patch array to.
+
+        Returns
+        -------
+
+        """
+        with h5py.File(f"./{hf_filename}", 'r') as feature_data_hf:
+            # Remember that we transposed the wX, qX data when we store them in hdf5 files. This is why 
+            # it's channel first here, despite tensorflow adopting the paradigm of being channel last. 
+            # Hence why we also transpose after slicing.
+            channel_wX = feature_data_hf["wX"][channel_idx, :, :, :].T
+            channel_qX = feature_data_hf["qX"][channel_idx, :, :, :].T
+
+            # We have to reshape into a 4 tensor because Tensorflow is picky.
+            channel_wX = reshape(channel_wX, (*channel_wX.shape, 1))
+            channel_qX = reshape(channel_qX, (*channel_qX.shape, 1))
+
+            # TODO: You may have to do this in batches as well.
+            seg_data = _segment_data2D(
+                kernel_size, strides, padding, channel_wX, channel_qX
+            )
+
+            # Store the directions in our random walk as ROWS because it makes accessing
+            # them substantially faster.
+            with h5py.File(f"./{patch_hf_filename}", 'w') as patch_hf:
+                patch_hf.create_dataset(f"wX_channel{channel_idx}", data = seg_data.wX_seg.T)
+                patch_hf.create_dataset(f"qX_channel{channel_idx}", data = seg_data.qX_seg.T)
+
+            # Delete temporary arrays to prevent memory leak across loop iterations.
+            del seg_data, channel_wX, channel_qX
+
 
 class QuantizedNeuralNetwork:
     def __init__(
@@ -493,58 +594,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         self.alphabet = linspace(-1, 1, num=int(round(2 ** (bits))))
         self.logger = logger
 
-    def _segment_data2D(
-        self, kernel_size: tuple, strides: tuple, padding: str, channel_wX: array, channel_qX: array
-    ) -> SegmentedData:
-        """Reshapes image tensor data into a 2D tensor. The rows of this 2D tensor are
-        the flattened patches which are the arguments of the convolutions in a Conv2D layer.
-
-        Parameters
-        -----------
-        kernel_size : (int, int)
-            Shape of the kernel for a Conv2D layer.
-        strides : (int, int)
-            Strides of the kernel for a Conv2D layer.
-        padding : string
-            Either 'valid' or 'same', as in docstring for Conv2D layer.
-        channel_wX : 2D array
-            Layer (channel) input for the analog convolutional neural network.
-        channel_qX : 2D array
-            Layer (channel) input for the quantized convolutional neural network.
-
-        Returns
-        -------
-        SegmentedData: NamedTuple(wX_seg, qX_seg)
-            Both wX_seg and qX_seg are 2D tensors whose rows are the flattened patches
-            used in the convolutions of the analog and quantized Conv2D layers, respectively.
-        """
-
-        kernel_sizes_list = [1, kernel_size[0], kernel_size[1], 1]
-        strides_list = [1, strides[0], strides[1], 1]
-        rates = [1, 1, 1, 1]
-
-        wX_seg = extract_patches(
-            images=channel_wX,
-            sizes=kernel_sizes_list,
-            strides=strides_list,
-            rates=rates,
-            padding=padding,
-        )
-        qX_seg = extract_patches(
-            images=channel_qX,
-            sizes=kernel_sizes_list,
-            strides=strides_list,
-            rates=rates,
-            padding=padding,
-        )
-
-        # Reshape tensor data into a 2 tensor, where the patches are vectorized and stored in the rows.
-        new_shape = (wX_seg.shape[0] * wX_seg.shape[1] * wX_seg.shape[2], wX_seg.shape[3])
-        wX_seg = reshape(wX_seg, new_shape)
-        qX_seg = reshape(qX_seg, new_shape)
-
-        return SegmentedData(wX_seg=wX_seg, qX_seg=qX_seg)
-
     def _quantize_channel(
         self,
         layer_idx: int,
@@ -640,6 +689,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                     quantized_chan_filter_list += [future.result()]
                 except Exception as exc:
                     super()._log(f'Channel {channel_idx} generated an exception: {exc}')
+                    raise Exception
 
         return quantized_chan_filter_list
 
@@ -755,6 +805,85 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # Now delete the hdf5 file.
         os.remove(f"./layer{layer_idx}_patch_tensors.h5")
 
+    def _quantize_conv2D_layer_parallel(self, layer_idx: int):
+        # wX formatted as an array of images. No flattening.
+        layer = self.trained_net.layers[layer_idx]
+        num_filters = layer.filters
+        filter_shape = layer.kernel_size
+        strides = layer.strides
+        padding = layer.padding.upper()
+        W = layer.get_weights()[0]
+        num_channels = W.shape[-2]  
+
+        input_shape = self.trained_net.layers[0].input_shape[1:]
+
+        # Grab the filename for the hdf5 file which stores the output of the previous
+        # hidden layers.
+        hf_filename = super()._get_layer_data(layer_idx)
+
+        # Now build the hdf5 files which store the ``vectorized'' image patches for each channel.
+        # It's convenient to restructure the data this way because it reduces quantizing channel filters
+        # in a convolutional layer to the same dynamical system we use to quantize hidden units
+        # in a perceptron.
+        super()._log("\tBuilding patch arrays...")
+        tic = time()
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            # Build a dictionary with (key, value) = (future, channel_idx). This will
+            # help us map channel image patches to the correct neuron index as we call
+            # _quantize_neuron asynchronously.
+            future_to_channel = {executor.submit(_build_patch_array_parallel, channel_idx, filter_shape, 
+                strides,
+                padding,
+                hf_filename, # Reference to hdf5 file that contains wX, qX 
+                f"layer{layer_idx}_channel{channel_idx}_patch_array.h5", # Filename for hdf5 file to save this channel's patch array to
+                ): channel_idx for channel_idx in range(num_channels)}
+            for future in concurrent.futures.as_completed(future_to_channel):
+                channel_idx = future_to_channel[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    self._log(f'\tChannel {channel_idx}\'s patch array generated an exception: {exc}')
+                    raise Exception
+
+                self._log(f'\t\tChannel {channel_idx}\'s patch array generated successfully.')
+        super()._log(f"\tdone. {time() - tic:.2f} seconds.")
+
+        # Now that the channel patch arrays are built, we can delete the hdf5 file that stores the 
+        # wX, qX datasets.
+        os.remove(f"./{hf_filename}")
+
+        rad = self.alphabet_scalar * median(abs(W.flatten()))
+        Q = zeros(W.shape)
+
+        # TODO: Quantize the filters in parallel.
+
+        # Open hdf5 file object for reading.
+        with h5py.File(f"layer{layer_idx}_patch_tensors.h5", 'r') as hf:
+
+            # TODO: multiprocess here. You may need to pass hf as a string of the filename
+            # rather than the file object.
+            for filter_idx in range(num_filters):
+                super()._log(f"\tQuantizing filter {filter_idx} of {num_filters}...")
+                tic = time()
+                quantized_chan_filter_list = self._quantize_filter2D(
+                    layer_idx, filter_idx, hf, rad
+                )
+                # Now we need to stack all the channel information together again.
+                quantized_filter = zeros((filter_shape[0], filter_shape[1], num_channels))
+                for channel_filter in quantized_chan_filter_list:
+                    channel_idx = channel_filter.channel_idx
+                    quantized_filter[:, :, channel_idx] = channel_filter.q_filtr
+
+                Q[:, :, :, filter_idx] = quantized_filter
+
+                super()._log(f"\tdone. {time() - tic:.2f} seconds.")
+
+        super()._update_weights(layer_idx, Q)
+
+        # Now delete the hdf5 files that stored the patch arrays for quantizing this layer.
+        # TODO: loop through all of the patch arrays and delete them.
+        os.remove(f"./layer{layer_idx}_patch_tensors.h5")
+
     def quantize_network(self):
 
         for layer_idx, layer in enumerate(self.trained_net.layers):
@@ -767,5 +896,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             if layer.__class__.__name__ == "Conv2D":
                 super()._log(f"Quantizing (Conv2D) layer {layer_idx}...")
                 tic = time()
-                self._quantize_conv2D_layer(layer_idx)
+                # self._quantize_conv2D_layer(layer_idx)
+                self._quantize_conv2D_layer_parallel(layer_idx)
                 super()._log(f"done. {time() - tic:.2f} seconds.")
