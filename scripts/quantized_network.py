@@ -107,12 +107,12 @@ def _quantize_neuron_parallel(
         A tuple with the layer and neuron index, as well as the quantized neuron.
     """
     with h5py.File(hf_filename, 'r') as hf:
-        N_ell = hf['wX'].shape[1]
-        u = zeros(hf['wX'].shape[0])
+        N_ell = hf['wX'].shape[0]
+        u = zeros(hf['wX'].shape[1])
         q = zeros(N_ell)
         for t in range(N_ell):
-            q[t] = _quantize_weight_parallel(w[t], u, hf['wX'][:, t], hf['qX'][:, t], alphabet)
-            u += w[t] * hf['wX'][:, t] - q[t] * hf['qX'][:, t]
+            q[t] = _quantize_weight_parallel(w[t], u, hf['wX'][t, :], hf['qX'][t, :], alphabet)
+            u += w[t] * hf['wX'][t, :] - q[t] * hf['qX'][t, :]
 
     return q
 
@@ -345,8 +345,8 @@ class QuantizedNeuralNetwork:
             with h5py.File(hf_filename, 'w') as hf:
                 # TODO: Store the directions in our random walk as ROWS because it makes accessing
                 # them substantially faster.
-                hf.create_dataset(f"wX", data = wX)
-                hf.create_dataset(f"qX", data = qX)
+                hf.create_dataset(f"wX", data = wX.T)
+                hf.create_dataset(f"qX", data = qX.T)
 
             # Delete wX, qX to free up memory.
             del wX, qX
@@ -440,9 +440,9 @@ class QuantizedNeuralNetwork:
                     # with the quantized neuron
                     Q[:, neuron_idx] = future.result()
                 except Exception as exc:
-                    self._log(f'Neuron {neuron_idx} generated an exception: {exc}')
+                    self._log(f'\tNeuron {neuron_idx} generated an exception: {exc}')
 
-                self._log(f'Neuron {neuron_idx} quantized successfully.')
+                self._log(f'\tNeuron {neuron_idx} quantized successfully.')
 
             # Set the weights for the quantized network.
             self._update_weights(layer_idx, Q)
@@ -708,7 +708,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
         input_shape = self.trained_net.layers[0].input_shape[1:]
 
-        # TODO: You may have to write these to hdf5.
+        # TODO: This function now returns an hdf5 filename. It also has transposed the data,
+        # so you'll need to modify your code to account for that.
         wX, qX = super()._get_layer_data(layer_idx)
         super()._log("\tBuilding patch tensors...")
 
