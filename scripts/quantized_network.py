@@ -143,13 +143,10 @@ def _segment_data2D(
             used in the convolutions of the analog and quantized Conv2D layers, respectively.
         """
 
-        print("Inside _segment_data2D.")
-
         kernel_sizes_list = [1, kernel_size[0], kernel_size[1], 1]
         strides_list = [1, strides[0], strides[1], 1]
         rates = [1, 1, 1, 1]
-        print("Going to extract patches...")
-        breakpoint()
+
         wX_seg = extract_patches(
             images=channel_wX,
             sizes=kernel_sizes_list,
@@ -157,8 +154,6 @@ def _segment_data2D(
             rates=rates,
             padding=padding,
         )
-        breakpoint()
-        print("\twX segmented!")
 
         qX_seg = extract_patches(
             images=channel_qX,
@@ -167,8 +162,6 @@ def _segment_data2D(
             rates=rates,
             padding=padding,
         )
-
-        print("\tqX segmented!")
 
         # Reshape tensor data into a 2 tensor, where the patches are vectorized and stored in the rows.
         new_shape = (wX_seg.shape[0] * wX_seg.shape[1] * wX_seg.shape[2], wX_seg.shape[3])
@@ -208,21 +201,15 @@ def _build_patch_array_parallel(channel_idx: int, kernel_size: tuple, strides: t
             channel_wX = feature_data_hf["wX"][channel_idx, :, :, :].T
             channel_qX = feature_data_hf["qX"][channel_idx, :, :, :].T
 
-        print("Channel data extracted!")
-
         # We have to reshape into a 4 tensor because Tensorflow is picky.
         channel_wX = reshape(channel_wX, (*channel_wX.shape, 1))
         channel_qX = reshape(channel_qX, (*channel_qX.shape, 1))
 
-        print("Channel data reshaped!")
-
         # TODO: You may have to do this in batches as well.
-        # TODO: Something breaks here!
+        # TODO: Something breaks here if you multiprocess.
         seg_data = _segment_data2D(
             kernel_size, strides, padding, channel_wX, channel_qX
         )
-
-        print("Channel data segmented!")
 
         # Store the directions in our random walk as ROWS because it makes accessing
         # them substantially faster.
@@ -944,29 +931,36 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # TODO: THREADLOCK HERE
 
 
-        super()._log("\tBuilding patch arrays (in parallel)...")
-        tic = time()
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            # Build a dictionary with (key, value) = (future, channel_idx). This will
-            # help us map channel image patches to the correct neuron index as we call
-            # _quantize_neuron asynchronously.
-            future_to_channel = {executor.submit(_build_patch_array_parallel, channel_idx, filter_shape, 
+        # super()._log("\tBuilding patch arrays (in parallel)...")
+        # tic = time()
+        # with concurrent.futures.ProcessPoolExecutor() as executor:
+        #     # Build a dictionary with (key, value) = (future, channel_idx). This will
+        #     # help us map channel image patches to the correct neuron index as we call
+        #     # _quantize_neuron asynchronously.
+        #     future_to_channel = {executor.submit(_build_patch_array_parallel, channel_idx, filter_shape, 
+        #         strides,
+        #         padding,
+        #         hf_filename, # Reference to hdf5 file that contains wX, qX 
+        #         channel_hf_filenames[channel_idx], # Filename for hdf5 file to save this channel's patch array to
+        #         ): channel_idx for channel_idx in range(num_channels)}
+        #     for future in concurrent.futures.as_completed(future_to_channel):
+        #         channel_idx = future_to_channel[future]
+        #         try:
+        #             future.result()
+        #         except Exception as exc:
+        #             self._log(f'\t\tChannel {channel_idx}\'s patch array generated an exception: {exc}')
+        #             raise Exception
+
+        #         self._log(f'\t\tChannel {channel_idx}\'s patch array generated successfully.')
+        # super()._log(f"\tdone. {time() - tic:.2f} seconds.")
+
+        for channel_idx in range(num_channels):
+            _build_patch_array_parallel(channel_idx, filter_shape, 
                 strides,
                 padding,
                 hf_filename, # Reference to hdf5 file that contains wX, qX 
                 channel_hf_filenames[channel_idx], # Filename for hdf5 file to save this channel's patch array to
-                ): channel_idx for channel_idx in range(num_channels)}
-            breakpoint()
-            for future in concurrent.futures.as_completed(future_to_channel):
-                channel_idx = future_to_channel[future]
-                try:
-                    future.result()
-                except Exception as exc:
-                    self._log(f'\t\tChannel {channel_idx}\'s patch array generated an exception: {exc}')
-                    raise Exception
-
-                self._log(f'\t\tChannel {channel_idx}\'s patch array generated successfully.')
-        super()._log(f"\tdone. {time() - tic:.2f} seconds.")
+                )
 
         # Now that the channel patch arrays are built, we can delete the hdf5 file that stores the 
         # wX, qX datasets.
