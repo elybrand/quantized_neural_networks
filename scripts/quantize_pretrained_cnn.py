@@ -27,7 +27,7 @@ logger.addHandler(sh)
 # Grab the pretrained model name
 pretrained_model = [argv[1]]
 data_sets = ["cifar10"]
-q_train_sizes = [1]
+q_train_sizes = [1000]
 ignore_layers = [[]]
 bits = [np.log2(i) for i in  (3, 4, 8, 16)]
 alphabet_scalars = [2, 3, 4, 5, 6]
