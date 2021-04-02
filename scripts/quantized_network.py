@@ -927,9 +927,10 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # in a convolutional layer to the same dynamical system we use to quantize hidden units
         # in a perceptron.
 
-
-        # TODO: THREADLOCK HERE
-
+        # TODO: there's an issue when multiprocessing this code. I traced the issue down
+        # to when I call tensorflow's extract_patches function inside _segment_data2D.
+        # I have no idea why it's deadlocking there, so I guess I would need to find/write 
+        # another function to extract the image patches.
 
         # super()._log("\tBuilding patch arrays (in parallel)...")
         # tic = time()
@@ -954,6 +955,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         #         self._log(f'\t\tChannel {channel_idx}\'s patch array generated successfully.')
         # super()._log(f"\tdone. {time() - tic:.2f} seconds.")
 
+        super()._log(f"\tBuilding patch tensors...")
+        tic = time()
         for channel_idx in range(num_channels):
             _build_patch_array_parallel(channel_idx, filter_shape, 
                 strides,
@@ -961,6 +964,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                 hf_filename, # Reference to hdf5 file that contains wX, qX 
                 channel_hf_filenames[channel_idx], # Filename for hdf5 file to save this channel's patch array to
                 )
+        super()._log(f"\tdone. {time() - tic:.2f} seconds.")
 
         # Now that the channel patch arrays are built, we can delete the hdf5 file that stores the 
         # wX, qX datasets.
