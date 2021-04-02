@@ -928,7 +928,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # in a perceptron.
 
         # TODO: there's an issue when multiprocessing this code. I traced the issue down
-        # to when I call tensorflow's extract_patches function inside _segment_data2D.
+        # to when I call tensorflow's extract_patches() inside _segment_data2D().
         # I have no idea why it's deadlocking there, so I guess I would need to find/write 
         # another function to extract the image patches.
 
