@@ -14,6 +14,12 @@ import cv2
 # recreates the results of pretrained models on ImageNet. You can find a blogpost and a link
 # to that repo on Caleb's website.
 # https://calebrob.com/ml/imagenet/ilsvrc2012/2018/10/22/imagenet-benchmarking.html.
+#
+# This script shards and resizes images to 224x224. Importantly, it does not preprocess the images
+# according to pretrained model specifications. This is because the pretrained models all
+# preprocess in different manners, so that is left to the script which evaluates the networks on
+# the test data.
+
 
 path_imagenet_val_dataset = Path("../data/") # path/to/data/
 dir_images = Path("../data/val") # path/to/images/directory
