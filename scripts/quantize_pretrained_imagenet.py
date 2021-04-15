@@ -3,9 +3,12 @@ import pandas as pd
 import logging
 from itertools import product
 from collections import namedtuple
+from tensorflow import argsort, cast, transpose, argmax, int32, float32
+from tensorflow.math import reduce_any, reduce_mean
 from tensorflow.random import set_seed
 from tensorflow.keras.models import load_model, clone_model, save_model
 from tensorflow.keras.applications import ResNet50, MobileNetV2
+from tensorflow.keras.applications.resnet import preprocess_input as resnet_preprocess_input
 from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedCNN
 from itertools import chain
@@ -28,15 +31,22 @@ logger.setLevel(level=logging.INFO)
 logger.addHandler(fh)
 logger.addHandler(sh)
 
+# Specify the paths that contain the quantization training data and test data.
+# Note that these directories are formed *after* running the preprocess_imagenet.py script.
+dir_imagenet_val_dataset = Path("../data/")
+dir_processed_images = Path("../data/preprocessed_val/")
+
 # Grab the pretrained model name
 pretrained_model = [ResNet50]
+preprocessing_func = [resnet_preprocess_input]
 data_sets = ["ILSVRC2012"]
-q_train_sizes = [1000]
-bits = [np.log2(i) for i in  (3, 4, 8, 16)]
-alphabet_scalars = [2, 3, 4, 5, 6]
+q_train_sizes = [10]
+bits = [np.log2(i) for i in  (3,)]
+alphabet_scalars = [2]
 
 parameter_grid = product(
     pretrained_model,
+    preprocess_func,
     data_sets,
     q_train_sizes,
     bits,
@@ -45,85 +55,89 @@ parameter_grid = product(
 
 ParamConfig = namedtuple(
     "ParamConfig",
-    "pretrained_model, data_set, q_train_size, bits, alphabet_scalar",
+    "pretrained_model, preprocess_func, data_set, q_train_size, bits, alphabet_scalar",
 )
 param_iterable = (ParamConfig(*config) for config in parameter_grid)
 
+def _preprocess_and_reshape(image_path, preprocess_func):
+    image = np.load(image_path)
+    preprocessed_image = preprocess_func(image)
+    reshaped_image = np.reshape(preprocessed_image, (1, *preprocessed_image.shape))
+    return reshaped_image
+
+def get_image_generator(image_paths, preprocess_func, epochs=1):
+    image_iterator = (_preprocess_and_reshape(image_path, preprocess_func) for image_path in image_paths)
+    for epoch in range(1, epochs):
+        # Chain together another copy of base_iterator if epochs > 1.
+        image_iterator = chain(image_iterator, (_preprocess_and_reshape(image_path, preprocess_func) for image_path in image_paths))
+
+    return image_iterator
+
+def top_k_accuracy(y_true, y_pred, k=1, tf_enabled=True):
+    '''
+    Calculates top_k accuracy of predictions. Expects both y_true and y_pred to be one-hot encoded.
+    numpy implementation is from: https://github.com/chainer/chainer/issues/606
+    '''
+
+    if tf_enabled:
+        argsorted_y = argsort(y_pred)[:,-k:]
+        matches = cast(reduce_any(transpose(argsorted_y) == argmax(y_true, axis=1, output_type=int32), axis=0), float32)
+        return  reduce_mean(matches).numpy()
+    else:
+        argsorted_y = np.argsort(y_pred)[:,-k:]
+        return np.any(argsorted_y.T == y_true.argmax(axis=1), axis=0).mean()
+
 def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
 
-    # Consider using ImageDataGenerator. See https://towardsdatascience.com/transfer-learning-in-action-from-imagenet-to-tiny-imagenet-b96fe3aa5973
-    # You'll want to use .flow_from_directory(). Use class_mode=None, and you'll still need the data
-    # to be in a subdirectory.
+    # Load the image paths and the labels. Order of labels must match
+    # alphanumeric sorting of the paths, so we sort the paths.
+    image_paths = np.array(sorted(glob(str(dir_processed_images/"*.npy"))))
+    num_images = len(image_paths)
+    y = np.load(str(dir_imagenet_val_dataset/"y_val.npy"))
 
-    # TODO: the ImageDataGenerator class is nice, but it does assume a special directory
-    # structure. You need to somehow pair images with labels in a way that makes it
-    # easier to divide into train and test. Caleb's script doesn't account for this split.
+    train_idxs = np.random.choice(range(num_images), size=parameters.q_train_size, replace=False,)
+    test_idxs = sorted(list(set(train_idxs).difference(set(train_idxs))))
 
-    # Initialize generator objects with the correct preprocessing function
-    # for yielding the training and test data.
-    train_image_generator = tf.keras.preprocessing.image.ImageDataGenerator(
-        preprocessing_function=parameters.pretrained_model.preprocess_input,
-    )
-    test_image_generator = tf.keras.preprocessing.image.ImageDataGenerator(
-        preprocessing_function=parameters.pretrained_model.preprocess_input,
-    )
+    train_paths = image_paths[train_idxs]
+    test_paths = image_paths[test_idxs]
+    y_train = y[train_idxs]
+    y_test = y[test_idxs]
 
-    # Tell the generators from which directories to pull from. 
-    train_get_data = image_generator.flow_from_directory(
-                    directory, # TODO
-                    target_size=(224, 224), # This matches the dimensions that Caleb's script resizes to.
-                    class_mode=None, # We do not need labels for learning the quantization.
-                    batch_size=1,    # The quantized network classes request one at a time.
-                    shuffle=True,    # TODO: This shuffle is problematic because Caleb's script
-                                     # saves labels according to how the data are ordered.
-                    seed=0,          # Set a random seed for shuffling.
-                    interpolation="nearest", # Define the upsampling method in case dimensions don't match.
-                                             # Caleb's script already resizes the images to 224x224, so we
-                                             # don't need to worry about this kwarg.
-                )
-
-    # TODO: I don't have the directory structure set up to infer class labels here.
-    # Also, you can do this once and for all outside of the quantize_network() routine
-    # in case that saves you time.
-    test_get_data = image_generator.flow_from_directory(
-                directory, # TODO
-                target_size=(224, 224), # This matches the dimensions that Caleb's script resizes to.
-                class_mode=None,    # We do not need labels for learning the quantization.
-                batch_size=32, 
-                shuffle=True,       # TODO: This shuffle is problematic because Caleb's script
-                                    # saves labels according to how the data are ordered.
-                seed=0,             # Set a random seed for shuffling.
-                interpolation="nearest", # Define the upsampling method in case dimensions don't match.
-                                         # Caleb's script already resizes the images to 224x224, so we
-                                         # don't need to worry about this kwarg.
-            )
-
-    num_classes = np.unique(y_train).shape[0]
+    # Use one-hot encoding for labels. 
+    num_classes = np.unique(y).shape[0]
     y_train = to_categorical(y_train, num_classes)
     y_test = to_categorical(y_test, num_classes)
-    input_shape = X_train[0].shape
 
-    # Load the model.
-    model = parameters.pretrained_model
-    # TODO: feed in image_generators.
-    analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
-    logger.info(f"Analog network test accuracy = {analog_accuracy:.2f}")
+    # Load the model with imagenet weights and the top layer included.
+    model = parameters.pretrained_model()
+    model.compile(
+        optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
+    )
 
-    # Find out how many layers you're going to quantize.
+    # TODO: change to test set and change preprocessing function when ready to deploy
+    # test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
+    # y_test_pred_analog = model.predict(test_generator, verbose=True)
+    # top1_analog = top_k_accuracy(y_test, y_test_pred_analog, k=1, tf_enabled=True)
+    # top5_analog = top_k_accuracy(y_test, y_test_pred_analog, k=5, tf_enabled=True)
+
+    train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
+    y_train_pred_analog = model.predict(train_generator, verbose=True)
+    top1_analog = top_k_accuracy(y_train, y_train_pred_analog, k=1, tf_enabled=True)
+    top5_analog = top_k_accuracy(y_train, y_train_pred_analog, k=5, tf_enabled=True)
+
+    logger.info(f"Analog network (top 1 accuracy, top 5 accuracy) = ({top1_analog:.2f}, {top5_analog:.2f})")
+
+
+    # Find out how many layers you're going to quantize. This tells us how many
+    # times we need to chain together the training image generator.
     layer_names = np.array([layer.__class__.__name__ for layer in model.layers])
     num_layers_to_quantize = sum((layer_names == 'Dense') + (layer_names == 'Conv2D'))
-
-    get_data = (sample for sample in X_train[0:quant_train_size])
-    for i in range(num_layers_to_quantize):
-        # Chain together iterators over the entire training set. This is so each layer uses
-        # the entire training data.
-        get_data = chain(get_data, (sample for sample in X_train[0:quant_train_size]))
-    batch_size = quant_train_size
+    quantization_train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=num_layers_to_quantize)
 
     my_quant_net = QuantizedCNN(
         network=model,
-        batch_size=batch_size,
-        get_data=get_data,
+        batch_size=parameters.q_train_size,
+        get_data=quantization_train_generator,
         logger=logger,
         bits=parameters.bits,
         alphabet_scalar=parameters.alphabet_scalar,
@@ -132,7 +146,6 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     my_quant_net.quantize_network()
     quantization_time = time()-tic
 
-    # TODO: look at both top-1 and top-5.
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
@@ -142,7 +155,18 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     model_name = f"quantized_{model.name}_scaler{parameters.alphabet_scalar}_{parameters.bits}bits_{model_timestamp}"
     save_model(my_quant_net.quantized_net, f"../quantized_models/{model_name}")
 
-    q_loss, q_accuracy = my_quant_net.quantized_net.evaluate(X_test, y_test, verbose=True)
+    # TODO: change image paths!
+    # test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
+    # y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True)
+    # top1_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=1, tf_enabled=True)
+    # top5_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=5, tf_enabled=True)
+
+    train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
+    y_train_pred_gpfq = my_quant_net.quantized_net.predict(train_generator, verbose=True)
+    top1_gpfq = top_k_accuracy(y_train, y_test_pred_gpfq, k=1, tf_enabled=True)
+    top5_gpfq = top_k_accuracy(y_train, y_test_pred_gpfq, k=5, tf_enabled=True)
+
+    logger.info(f"GPFQ network (top 1 accuracy, top 5 accuracy) = ({top1_gpfq:.2f}, {top5_gpfq:.2f})")
 
     # Construct MSQ Net.
     MSQ_model = clone_model(model)
@@ -150,7 +174,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     MSQ_model.set_weights(model.get_weights())
     for layer_idx, layer in enumerate(model.layers):
         if layer.__class__.__name__ in ("Dense", "Conv2D"):
-            # Use the same radius as the alphabet in the corresponding layer of the Sigma Delta network.
+            # Use the same radius as the alphabet in the corresponding layer of the GPFQ network.
             rad = max(
                 my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten()
             )
@@ -164,7 +188,17 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     MSQ_model.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
-    MSQ_loss, MSQ_accuracy = MSQ_model.evaluate(X_test, y_test, verbose=True)
+    # test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
+    # y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True)
+    # top1_msq = top_k_accuracy(y_test, y_test_pred_msq, k=1, tf_enabled=True)
+    # top5_msq = top_k_accuracy(y_test, y_test_pred_msq, k=5, tf_enabled=True)
+
+    train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
+    y_train_pred_msq = MSQ_model.predict(train_generator, verbose=True)
+    top1_msq = top_k_accuracy(y_train, y_train_pred_msq, k=1, tf_enabled=True)
+    top5_msq = top_k_accuracy(y_train, y_train_pred_msq, k=5, tf_enabled=True)
+
+    logger.info(f"MSQ network (top 1 accuracy, top 5 accuracy) = ({top1_msq:.2f}, {top5_msq:.2f})")
 
     trial_metrics = pd.DataFrame(
         {
@@ -173,12 +207,12 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
             "q_train_size": parameters.q_train_size,
             "bits": parameters.bits,
             "alphabet_scalar": parameters.alphabet_scalar,
-            "analog_test_top1_acc": ,# TODO
-            "analog_test_top5_acc": ,# TODO
-            "sd_test_top1_acc": , #TODO
-            "sd_test_top5_acc": , #TODO
-            "msq_test_top1_acc": , #TODO
-            "msq_test_top5_acc": , #TODO
+            "analog_test_top1_acc": top1_analog,
+            "analog_test_top5_acc": top5_analog,
+            "gpfq_test_top1_acc": top1_gpfq,
+            "gpfq_test_top5_acc": top5_gpfq,
+            "msq_test_top1_acc": top1_msq,
+            "msq_test_top5_acc": top5_msq,
             "quantization_time": quantization_time,
         },
         index=[model_timestamp],
