@@ -16,5 +16,4 @@ quantized_models/
 model_metrics/
 data/val
 data/*.npy
-train_data/
-test_data/
+data/preprocessed_val
