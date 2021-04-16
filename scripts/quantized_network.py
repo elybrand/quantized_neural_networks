@@ -480,7 +480,15 @@ class QuantizedNeuralNetwork:
 
         # Retrieve a batch of data.
         input_analog_layer = self.trained_net.layers[0]
-        input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
+        try:
+            # Don't ask me why, but for some models like the pretrained models the input layer's input shape
+            # is a list of a single tuple.
+            if len(input_analog_layer.input_shape) >= 1:
+                input_shape = input_analog_layer.input_shape[0][1:] if input_analog_layer.input_shape[0][0] is None else input_analog_layer.input_shape[0]
+        except TypeError:
+            # It's not a list, so just access the tuple shape directly.
+            input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
+        
         batch = zeros((self.batch_size, *input_shape))
 
         for sample_idx in range(self.batch_size):
