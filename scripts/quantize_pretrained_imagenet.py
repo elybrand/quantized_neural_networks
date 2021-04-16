@@ -38,11 +38,13 @@ dir_processed_images = Path("../data/preprocessed_val/")
 
 # Grab the pretrained model name
 pretrained_model = [ResNet50]
-preprocessing_func = [resnet_preprocess_input]
+preprocess_func = [resnet_preprocess_input]
 data_sets = ["ILSVRC2012"]
 q_train_sizes = [10]
 bits = [np.log2(i) for i in  (3,)]
 alphabet_scalars = [2]
+
+# TODO: SET RANDOM SEEDS!!
 
 parameter_grid = product(
     pretrained_model,
@@ -163,8 +165,8 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
 
     train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
     y_train_pred_gpfq = my_quant_net.quantized_net.predict(train_generator, verbose=True)
-    top1_gpfq = top_k_accuracy(y_train, y_test_pred_gpfq, k=1, tf_enabled=True)
-    top5_gpfq = top_k_accuracy(y_train, y_test_pred_gpfq, k=5, tf_enabled=True)
+    top1_gpfq = top_k_accuracy(y_train, y_train_pred_gpfq, k=1, tf_enabled=True)
+    top5_gpfq = top_k_accuracy(y_train, y_train_pred_gpfq, k=5, tf_enabled=True)
 
     logger.info(f"GPFQ network (top 1 accuracy, top 5 accuracy) = ({top1_gpfq:.2f}, {top5_gpfq:.2f})")
 
