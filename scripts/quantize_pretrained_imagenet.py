@@ -41,15 +41,12 @@ dir_processed_images = Path("../data/preprocessed_val/")
 pretrained_model = [MobileNet]
 preprocess_func = [mobilenet_preprocess_input]
 data_sets = ["ILSVRC2012"]
-q_train_sizes = [500]
-bits = [np.log2(i) for i in  (3,)]
-alphabet_scalars = [2]
+q_train_sizes = [1000]
+bits = [np.log2(i) for i in  (16,)]
+alphabet_scalars = [2, 3, 4, 5, 6]
 
 np_seed = 0
 tf_seed = 0
-np.random.seed(np_seed)
-set_seed(tf_seed)
-
 
 parameter_grid = product(
     pretrained_model,
@@ -95,6 +92,10 @@ def top_k_accuracy(y_true, y_pred, k=1, tf_enabled=True):
         return np.any(argsorted_y.T == y_true.argmax(axis=1), axis=0).mean()
 
 def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
+
+    # Reset the seeds for splitting training and testing
+    np.random.seed(np_seed)
+    set_seed(tf_seed)
 
     # Load the image paths and the labels. Order of labels must match
     # alphanumeric sorting of the paths, so we sort the paths.
@@ -159,6 +160,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     # Serialize the greedy network.
     model_timestamp = str(pd.Timestamp.now()).replace(" ", "_").replace(":","").replace(".","")
     model_name = f"quantized_{model.name}_scaler{parameters.alphabet_scalar}_{parameters.bits}bits_{model_timestamp}"
+    model_name = model_name.replace(".","")
     save_model(my_quant_net.quantized_net, f"../quantized_models/{model_name}")
 
     test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
@@ -185,11 +187,18 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
             rad = max(
                 my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten()
             )
-            W, b = model.layers[layer_idx].get_weights()
+            if MSQ_model.layers[layer_idx].use_bias:
+                W, b = model.layers[layer_idx].get_weights()
+            else:
+                # There's no bias vector
+                W = model.layers[layer_idx].get_weights()[0]
             Q = np.array([my_quant_net._bit_round(w, rad) for w in W.flatten()]).reshape(
                 W.shape
             )
-            MSQ_model.layers[layer_idx].set_weights([Q, b])
+            if MSQ_model.layers[layer_idx].use_bias:
+                MSQ_model.layers[layer_idx].set_weights([Q, b])
+            else:
+                MSQ_model.layers[layer_idx].set_weights([Q])
     logger.info(f"done. {time()-tic:.2f} seconds.")
     MSQ_model.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
