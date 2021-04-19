@@ -7,8 +7,9 @@ from tensorflow import argsort, cast, transpose, argmax, int32, float32
 from tensorflow.math import reduce_any, reduce_mean
 from tensorflow.random import set_seed
 from tensorflow.keras.models import load_model, clone_model, save_model
-from tensorflow.keras.applications import ResNet50, MobileNetV2
+from tensorflow.keras.applications import ResNet50, MobileNet
 from tensorflow.keras.applications.resnet import preprocess_input as resnet_preprocess_input
+from tensorflow.keras.applications.mobilenet import preprocess_input as mobilenet_preprocess_input
 from tensorflow.keras.utils import to_categorical
 from quantized_network import QuantizedCNN
 from itertools import chain
@@ -37,14 +38,18 @@ dir_imagenet_val_dataset = Path("../data/")
 dir_processed_images = Path("../data/preprocessed_val/")
 
 # Grab the pretrained model name
-pretrained_model = [ResNet50]
-preprocess_func = [resnet_preprocess_input]
+pretrained_model = [MobileNet]
+preprocess_func = [mobilenet_preprocess_input]
 data_sets = ["ILSVRC2012"]
-q_train_sizes = [10]
+q_train_sizes = [500]
 bits = [np.log2(i) for i in  (3,)]
 alphabet_scalars = [2]
 
-# TODO: SET RANDOM SEEDS!!
+np_seed = 0
+tf_seed = 0
+np.random.seed(np_seed)
+set_seed(tf_seed)
+
 
 parameter_grid = product(
     pretrained_model,
@@ -98,7 +103,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     y = np.load(str(dir_imagenet_val_dataset/"y_val.npy"))
 
     train_idxs = np.random.choice(range(num_images), size=parameters.q_train_size, replace=False,)
-    test_idxs = sorted(list(set(train_idxs).difference(set(train_idxs))))
+    test_idxs = list(set(range(len(image_paths))).difference(set(train_idxs)))
 
     train_paths = image_paths[train_idxs]
     test_paths = image_paths[test_idxs]
@@ -116,16 +121,15 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
 
-    # TODO: change to test set and change preprocessing function when ready to deploy
-    # test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
-    # y_test_pred_analog = model.predict(test_generator, verbose=True)
-    # top1_analog = top_k_accuracy(y_test, y_test_pred_analog, k=1, tf_enabled=True)
-    # top5_analog = top_k_accuracy(y_test, y_test_pred_analog, k=5, tf_enabled=True)
+    test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
+    y_test_pred_analog = model.predict(test_generator, verbose=True)
+    top1_analog = top_k_accuracy(y_test, y_test_pred_analog, k=1, tf_enabled=True)
+    top5_analog = top_k_accuracy(y_test, y_test_pred_analog, k=5, tf_enabled=True)
 
-    train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
-    y_train_pred_analog = model.predict(train_generator, verbose=True)
-    top1_analog = top_k_accuracy(y_train, y_train_pred_analog, k=1, tf_enabled=True)
-    top5_analog = top_k_accuracy(y_train, y_train_pred_analog, k=5, tf_enabled=True)
+    # train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
+    # y_train_pred_analog = model.predict(train_generator, verbose=True)
+    # top1_analog = top_k_accuracy(y_train, y_train_pred_analog, k=1, tf_enabled=True)
+    # top5_analog = top_k_accuracy(y_train, y_train_pred_analog, k=5, tf_enabled=True)
 
     logger.info(f"Analog network (top 1 accuracy, top 5 accuracy) = ({top1_analog:.2f}, {top5_analog:.2f})")
 
@@ -157,19 +161,20 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     model_name = f"quantized_{model.name}_scaler{parameters.alphabet_scalar}_{parameters.bits}bits_{model_timestamp}"
     save_model(my_quant_net.quantized_net, f"../quantized_models/{model_name}")
 
-    # TODO: change image paths!
-    # test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
-    # y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True)
-    # top1_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=1, tf_enabled=True)
-    # top5_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=5, tf_enabled=True)
+    test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
+    y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True)
+    top1_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=1, tf_enabled=True)
+    top5_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=5, tf_enabled=True)
 
-    train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
-    y_train_pred_gpfq = my_quant_net.quantized_net.predict(train_generator, verbose=True)
-    top1_gpfq = top_k_accuracy(y_train, y_train_pred_gpfq, k=1, tf_enabled=True)
-    top5_gpfq = top_k_accuracy(y_train, y_train_pred_gpfq, k=5, tf_enabled=True)
+    # train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
+    # y_train_pred_gpfq = my_quant_net.quantized_net.predict(train_generator, verbose=True)
+    # top1_gpfq = top_k_accuracy(y_train, y_train_pred_gpfq, k=1, tf_enabled=True)
+    # top5_gpfq = top_k_accuracy(y_train, y_train_pred_gpfq, k=5, tf_enabled=True)
 
     logger.info(f"GPFQ network (top 1 accuracy, top 5 accuracy) = ({top1_gpfq:.2f}, {top5_gpfq:.2f})")
 
+    logger.info(f"Building MSQ network...")
+    tic = time()
     # Construct MSQ Net.
     MSQ_model = clone_model(model)
     # Set all the weights to be equal at first. This matters for batch normalization layers.
@@ -185,27 +190,27 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
                 W.shape
             )
             MSQ_model.layers[layer_idx].set_weights([Q, b])
-
-    # TODO: look at both top-1 and top-5.
+    logger.info(f"done. {time()-tic:.2f} seconds.")
     MSQ_model.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
-    # test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
-    # y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True)
-    # top1_msq = top_k_accuracy(y_test, y_test_pred_msq, k=1, tf_enabled=True)
-    # top5_msq = top_k_accuracy(y_test, y_test_pred_msq, k=5, tf_enabled=True)
 
-    train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
-    y_train_pred_msq = MSQ_model.predict(train_generator, verbose=True)
-    top1_msq = top_k_accuracy(y_train, y_train_pred_msq, k=1, tf_enabled=True)
-    top5_msq = top_k_accuracy(y_train, y_train_pred_msq, k=5, tf_enabled=True)
+    test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
+    y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True)
+    top1_msq = top_k_accuracy(y_test, y_test_pred_msq, k=1, tf_enabled=True)
+    top5_msq = top_k_accuracy(y_test, y_test_pred_msq, k=5, tf_enabled=True)
+
+    # train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
+    # y_train_pred_msq = MSQ_model.predict(train_generator, verbose=True)
+    # top1_msq = top_k_accuracy(y_train, y_train_pred_msq, k=1, tf_enabled=True)
+    # top5_msq = top_k_accuracy(y_train, y_train_pred_msq, k=5, tf_enabled=True)
 
     logger.info(f"MSQ network (top 1 accuracy, top 5 accuracy) = ({top1_msq:.2f}, {top5_msq:.2f})")
 
     trial_metrics = pd.DataFrame(
         {
             "data_set": parameters.data_set,
-            "serialized_model": parameters.pretrained_model.name,
+            "serialized_model": model.name,
             "q_train_size": parameters.q_train_size,
             "bits": parameters.bits,
             "alphabet_scalar": parameters.alphabet_scalar,
@@ -216,6 +221,8 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
             "msq_test_top1_acc": top1_msq,
             "msq_test_top5_acc": top5_msq,
             "quantization_time": quantization_time,
+            "np_seed": np_seed,
+            "tf_seed": tf_seed,
         },
         index=[model_timestamp],
     )
