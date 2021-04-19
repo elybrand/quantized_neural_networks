@@ -17,3 +17,4 @@ model_metrics/
 data/val
 data/*.npy
 data/preprocessed_val
+scripts/*.h5
