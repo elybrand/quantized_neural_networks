@@ -11,11 +11,11 @@ from tensorflow.keras.applications import ResNet50, MobileNet
 from tensorflow.keras.applications.resnet import preprocess_input as resnet_preprocess_input
 from tensorflow.keras.applications.mobilenet import preprocess_input as mobilenet_preprocess_input
 from tensorflow.keras.utils import to_categorical
-from quantized_network import QuantizedCNN
+from quantized_network import QuantizedCNN, ImageNetSequence
 from itertools import chain
 from time import time
 from sys import stdout, argv
-from os import mkdir
+from os import mkdir, remove
 from pathlib import Path
 from glob import glob
 import scipy.io
@@ -41,7 +41,7 @@ dir_processed_images = Path("../data/preprocessed_val/")
 pretrained_model = [MobileNet]
 preprocess_func = [mobilenet_preprocess_input]
 data_sets = ["ILSVRC2012"]
-q_train_sizes = [1000]
+q_train_sizes = [500]
 bits = [np.log2(i) for i in  (16,)]
 alphabet_scalars = [2, 3, 4, 5, 6]
 
@@ -122,8 +122,11 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
 
-    test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
-    y_test_pred_analog = model.predict(test_generator, verbose=True)
+    logger.info("Generating analog predicted labels...")
+    tic = time()
+    test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
+    y_test_pred_analog = model.predict(test_generator, verbose=True, use_multiprocessing=True)
+    logger.info(f"done. {time()-tic:.2f} seconds.")
     top1_analog = top_k_accuracy(y_test, y_test_pred_analog, k=1, tf_enabled=True)
     top5_analog = top_k_accuracy(y_test, y_test_pred_analog, k=5, tf_enabled=True)
 
@@ -149,9 +152,16 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         bits=parameters.bits,
         alphabet_scalar=parameters.alphabet_scalar,
     )
-    tic = time()
-    my_quant_net.quantize_network()
-    quantization_time = time()-tic
+    try:
+        tic = time()
+        my_quant_net.quantize_network()
+        quantization_time = time()-tic
+    except:
+        # Probably ran out of disk space. Clean up the patch tensors and write to logger.
+        logger.info(f"An exception occurred. Cleaning up patch tensors...")
+        patch_tensor_paths = sorted(glob("./*.h5"))
+        for path in patch_tensor_paths:
+            remove(path)
 
     my_quant_net.quantized_net.compile(
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
@@ -163,8 +173,8 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     model_name = model_name.replace(".","")
     save_model(my_quant_net.quantized_net, f"../quantized_models/{model_name}")
 
-    test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
-    y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True)
+    test_generator = test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
+    y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True, use_multiprocessing=True)
     top1_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=1, tf_enabled=True)
     top5_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=5, tf_enabled=True)
 
@@ -204,8 +214,8 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
 
-    test_generator = get_image_generator(test_paths, parameters.preprocess_func, epochs=1)
-    y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True)
+    test_generator = test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
+    y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True, use_multiprocessing=True)
     top1_msq = top_k_accuracy(y_test, y_test_pred_msq, k=1, tf_enabled=True)
     top5_msq = top_k_accuracy(y_test, y_test_pred_msq, k=5, tf_enabled=True)
 
