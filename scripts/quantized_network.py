@@ -14,8 +14,11 @@ from numpy import (
     argmax,
     prod,
     zeros_like,
+    load,
 )
+from math import ceil
 from scipy.linalg import norm
+from tensorflow.keras.utils import Sequence
 from tensorflow.keras.backend import function as Kfunction
 from tensorflow.keras.models import Model, clone_model
 from tensorflow.image import extract_patches
@@ -318,6 +321,41 @@ def _quantize_channel_parallel(
 
             return q_filter
 
+class ImageNetSequence(Sequence):
+
+    def __init__(self, x_set, y_set, batch_size, preprocess_func):
+        """Constructs a child class of the Keras Sequence class to generate batches
+        of images for ImageNet. 
+
+        Parameters
+        -----------
+        x_set : 1D-array
+            Array of paths to images.
+        y_set : 1D-array
+            Labels for the images.
+        batch_size: int
+            Specifies how many images to generate in a batch.
+        preprocess_func: function
+            Preprocessing function to call before yielding images. Examples include the
+            preprocessing functions that come packaged with the pretrained keras models.
+        """
+
+        self.x, self.y = x_set, y_set
+        self.batch_size = batch_size
+        self.preprocess_func = preprocess_func
+
+    def __len__(self):
+        return ceil(len(self.x) / self.batch_size)
+
+    def __getitem__(self, idx):
+        batch_x = self.x[idx * self.batch_size:(idx + 1) *
+        self.batch_size]
+        batch_y = self.y[idx * self.batch_size:(idx + 1) *
+        self.batch_size]
+
+        return array([
+            self.preprocess_func(load(file_name))
+               for file_name in batch_x]), array(batch_y)
 
 class QuantizedNeuralNetwork:
     def __init__(
@@ -330,6 +368,29 @@ class QuantizedNeuralNetwork:
         bits=log2(3),
         alphabet_scalar=1,
     ):
+        """This is a wrapper class for a tensorflow.keras.models.Model class
+        which handles quantizing the weights for Dense layers.
+
+        Parameters
+        -----------
+        network : Model
+            The pretrained neural network.
+        batch_size : int,
+            How many training examples to use for learning the quantized weights in a
+            given layer.
+        get_data : Generator
+            A generator for yielding training examples for learning the quantized weights.
+        logger : logger
+            A logging object to write updates to. If None, updates are written to stdout.
+        ignore_layers : list of ints
+            A list of layer indices to indicate which layers are *not* to be quantized.
+        bits : float
+            How many bits to use for the quantization alphabet. There are 2**bits characters
+            in the quantization alphabet.
+        alphabet_scalar : float
+            A scaling parameter used to adjust the radius of the quantization alphabets for
+            each layer.
+        """
 
         self.get_data = get_data
 
@@ -648,7 +709,7 @@ class QuantizedNeuralNetwork:
                 except Exception as exc:
                     self._log(f'\tNeuron {neuron_idx} generated an exception: {exc}')
 
-                self._log(f'\tNeuron {neuron_idx} quantized successfully.')
+                self._log(f'\tNeuron {neuron_idx} of {N_ell_plus_1} quantized successfully.')
 
             # Set the weights for the quantized network.
             self._update_weights(layer_idx, Q)
@@ -660,6 +721,7 @@ class QuantizedNeuralNetwork:
         """Quantizes all Dense layers that are not specified by the list of ignored layers."""
 
         # This must be done sequentially.
+        num_layers = len(self.trained_net.layers)
         for layer_idx, layer in enumerate(self.trained_net.layers):
             if (
                 layer.__class__.__name__ == "Dense"
@@ -667,9 +729,9 @@ class QuantizedNeuralNetwork:
             ):
                 # Only quantize dense layers.
                 tic = time()
-                self._log(f"Quantizing layer {layer_idx} (in parallel)...")
+                self._log(f"Quantizing layer {layer_idx} (in parallel) of {num_layers}...")
                 self._quantize_layer_parallel(layer_idx)
-                self._log(f"Layer {layer_idx} quantized successfully in {time() - tic:.2f} seconds.")
+                self._log(f"Layer {layer_idx} of {num_layers} quantized successfully in {time() - tic:.2f} seconds.")
 
 
 class QuantizedCNN(QuantizedNeuralNetwork):
@@ -683,6 +745,27 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         bits=log2(3),
         alphabet_scalar=1,
     ):
+        """This is a wrapper class for a tensorflow.keras.models.Model class
+        which handles quantizing the weights for Dense and Conv2D layers.
+
+        Parameters
+        -----------
+        network : Model
+            The pretrained neural network.
+        batch_size : int,
+            How many training examples to use for learning the quantized weights in a
+            given layer.
+        get_data : Generator
+            A generator for yielding training examples for learning the quantized weights.
+        logger : logger
+            A logging object to write updates to. If None, updates are written to stdout.
+        bits : float
+            How many bits to use for the quantization alphabet. There are 2**bits characters
+            in the quantization alphabet.
+        alphabet_scalar : float
+            A scaling parameter used to adjust the radius of the quantization alphabets for
+            each layer.
+        """
 
         self.get_data = get_data
         self.trained_net = network
@@ -1003,7 +1086,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                     self._log(f'\t\tFilter {filter_idx} generated an exception: {exc}')
                     raise Exception
 
-                self._log(f'\t\tFilter {filter_idx} quantized successfully.')
+                self._log(f'\t\tFilter {filter_idx} of {num_filters} quantized successfully.')
 
         # Update the weights of the quantized network at this layer.
         super()._update_weights(layer_idx, Q)
@@ -1016,15 +1099,16 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
     def quantize_network(self):
 
+        num_layers = len(self.trained_net.layers)
         for layer_idx, layer in enumerate(self.trained_net.layers):
             if layer.__class__.__name__ == "Dense":
                 # Use parent class quantize layer
-                super()._log(f"Quantizing (dense) layer {layer_idx}...")
+                super()._log(f"Quantizing (Dense) layer {layer_idx} of {num_layers}...")
                 tic = time()
                 self._quantize_dense_layer(layer_idx)
                 super()._log(f"done. {time() - tic:.2f} seconds.")
             if layer.__class__.__name__ == "Conv2D":
-                super()._log(f"Quantizing (Conv2D) layer {layer_idx}...")
+                super()._log(f"Quantizing (Conv2D) layer {layer_idx} of {num_layers}...")
                 tic = time()
                 # self._quantize_conv2D_layer(layer_idx)
                 self._quantize_conv2D_layer_parallel(layer_idx)
