@@ -41,7 +41,7 @@ dir_processed_images = Path("../data/preprocessed_val/")
 pretrained_model = [MobileNet]
 preprocess_func = [mobilenet_preprocess_input]
 data_sets = ["ILSVRC2012"]
-q_train_sizes = [500]
+q_train_sizes = [25000]
 bits = [np.log2(i) for i in  (16,)]
 alphabet_scalars = [2, 3, 4, 5, 6]
 
@@ -125,7 +125,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     logger.info("Generating analog predicted labels...")
     tic = time()
     test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
-    y_test_pred_analog = model.predict(test_generator, verbose=True, use_multiprocessing=True)
+    y_test_pred_analog = model.predict(test_generator, verbose=True)
     logger.info(f"done. {time()-tic:.2f} seconds.")
     top1_analog = top_k_accuracy(y_test, y_test_pred_analog, k=1, tf_enabled=True)
     top5_analog = top_k_accuracy(y_test, y_test_pred_analog, k=5, tf_enabled=True)
@@ -174,7 +174,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     save_model(my_quant_net.quantized_net, f"../quantized_models/{model_name}")
 
     test_generator = test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
-    y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True, use_multiprocessing=True)
+    y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True)
     top1_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=1, tf_enabled=True)
     top5_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=5, tf_enabled=True)
 
@@ -215,7 +215,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     )
 
     test_generator = test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
-    y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True, use_multiprocessing=True)
+    y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True)
     top1_msq = top_k_accuracy(y_test, y_test_pred_msq, k=1, tf_enabled=True)
     top5_msq = top_k_accuracy(y_test, y_test_pred_msq, k=5, tf_enabled=True)
 
