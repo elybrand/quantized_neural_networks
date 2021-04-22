@@ -29,6 +29,7 @@ from time import time
 import concurrent.futures
 import h5py
 import os
+import gc
 
 # Define namedtuples for more interpretable return types.
 QuantizedNeuron = namedtuple("QuantizedNeuron", ["layer_idx", "neuron_idx", "q"])
@@ -197,6 +198,9 @@ def _build_patch_array_parallel(channel_idx: int, kernel_size: tuple, strides: t
         -------
 
         """
+
+        # TODO: YOU NEED TO SEGMENT IN BATCHES
+
         with h5py.File(f"./{hf_filename}", 'r') as feature_data_hf:
             # Remember that we transposed the wX, qX data when we store them in hdf5 files. This is why 
             # it's channel first here, despite tensorflow adopting the paradigm of being channel last. 
@@ -220,8 +224,9 @@ def _build_patch_array_parallel(channel_idx: int, kernel_size: tuple, strides: t
             patch_hf.create_dataset(f"wX_channel{channel_idx}", data = seg_data.wX_seg.T)
             patch_hf.create_dataset(f"qX_channel{channel_idx}", data = seg_data.qX_seg.T)
 
-        # Delete temporary arrays to prevent memory leak across loop iterations.
+        # Dereference and call garbage collectin just to be safe.
         del seg_data, channel_wX, channel_qX
+        gc.collect()
 
 def _quantize_filter2D_parallel(
         img_filter: array, channel_hf_filenames: dict, alphabet: array
@@ -363,6 +368,7 @@ class QuantizedNeuralNetwork:
         network: Model,
         batch_size: int,
         get_data: Generator[array, None, None],
+        mini_batch_size=32,
         logger=None,
         ignore_layers=[],
         bits=log2(3),
@@ -380,6 +386,10 @@ class QuantizedNeuralNetwork:
             given layer.
         get_data : Generator
             A generator for yielding training examples for learning the quantized weights.
+        mini_batch_size: int
+            How many training examples to feed through the hidden layers at a time. We can't feed
+            in the entire batch all at once if the batch is large since CPUs and GPUs are memory 
+            constrained.
         logger : logger
             A logging object to write updates to. If None, updates are written to stdout.
         ignore_layers : list of ints
@@ -404,6 +414,7 @@ class QuantizedNeuralNetwork:
         self.quantized_net.set_weights(network.get_weights())
 
         self.batch_size = batch_size
+        self.mini_batch_size = mini_batch_size
 
         self.alphabet_scalar = alphabet_scalar
 
@@ -536,35 +547,13 @@ class QuantizedNeuralNetwork:
             Filename of hdf5 file that contains datasets wX, qX.
         """
 
-        layer = self.trained_net.layers[layer_idx]
-        layer_data_shape = layer.input_shape[1:] if layer.input_shape[0] is None else layer.input_shape
-
-        # Retrieve a batch of data.
-        input_analog_layer = self.trained_net.layers[0]
-        try:
-            # Don't ask me why, but for some models like the pretrained models the input layer's input shape
-            # is a list of a single tuple.
-            if len(input_analog_layer.input_shape) >= 1:
-                input_shape = input_analog_layer.input_shape[0][1:] if input_analog_layer.input_shape[0][0] is None else input_analog_layer.input_shape[0]
-        except TypeError:
-            # It's not a list, so just access the tuple shape directly.
-            input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
-        
-        batch = zeros((self.batch_size, *input_shape))
-
-        for sample_idx in range(self.batch_size):
-            try:
-                batch[sample_idx, :] = next(self.get_data)
-            except StopIteration:
-                # No more samples!
-                break
-
+        # Determine how many inbound layers there are.
         if layer_idx == 0:
             # Don't need to feed data through hidden layers.
-            wX = batch
-            qX = batch
+            inbound_analog_layers = None
+            inbound_quant_layers = None
         else:
-            # Determine whether there is more than one input layer
+            # Determine whether there is more than one input layer. 
             inbound_analog_nodes = self.trained_net.layers[layer_idx].inbound_nodes
             if len(inbound_analog_nodes) > 1:
                 self._log(f"Number of inbound analog nodes = {inbound_analog_nodes}...not sure what to do here!")
@@ -585,41 +574,92 @@ class QuantizedNeuralNetwork:
                 inbound_analog_layers = [inbound_analog_layers]
                 inbound_quant_layers = [inbound_quant_layers]
 
-            num_inbound_layers = len(inbound_analog_layers)
-            wX = zeros((num_inbound_layers*self.batch_size, *layer_data_shape))
-            qX = zeros((num_inbound_layers*self.batch_size, *layer_data_shape))
-
-            # For every inbound layer, get the output from passing through that inbound layer
-            for inbound_layer_idx in range(num_inbound_layers):
-                analog_layer = inbound_analog_layers[inbound_layer_idx]
-                quant_layer = inbound_quant_layers[inbound_layer_idx]
-
-                # Define functions which will give you the output of the previous hidden layer
-                # for both networks.
-                prev_trained_output = Kfunction(
-                    [input_analog_layer.input],
-                    [analog_layer.output],
-                )
-                prev_quant_output = Kfunction(
-                [self.quantized_net.layers[0].input],
-                [quant_layer.output],
-                )
-
-                # Collect the output data
-                wX[inbound_layer_idx*self.batch_size:(inbound_layer_idx+1)*self.batch_size] = prev_trained_output([batch])[0]
-                qX[inbound_layer_idx*self.batch_size:(inbound_layer_idx+1)*self.batch_size] = prev_quant_output([batch])[0]
-
-        # Create an hdf5 file with a wX dataset and a qX dataset. We transpose the data because it's
-        # substantially faster to read the feature data as rows rather than columns.
+        # Now tell h5py how big your datasets are going to be. Remember that you'll actually
+        # be transposing the hidden layer data since it's faster to access the feature data
+        # when they're stored as rows.
+        layer = self.trained_net.layers[layer_idx]
+        layer_data_shape = layer.input_shape[1:] if layer.input_shape[0] is None else layer.input_shape
+        num_inbound_layers = len(inbound_analog_layers) if layer_idx != 0 else 1
+        hf_dataset_shape = (num_inbound_layers*self.batch_size, *layer_data_shape)[::-1]
         hf_filename = f"layer{layer_idx}_data.h5"
         with h5py.File(hf_filename, 'w') as hf:
-            hf.create_dataset(f"wX", data = wX.T)
-            hf.create_dataset(f"qX", data = qX.T)
+            hf.create_dataset("wX", shape=hf_dataset_shape)
+            hf.create_dataset("qX", shape=hf_dataset_shape)
 
-            
+            # Grab dimensions for mini-batch of training data.
+            input_analog_layer = self.trained_net.layers[0]
+            try:
+                # Don't ask me why, but for some models like the pretrained models the input layer's input shape
+                # is a list of a single tuple.
+                if len(input_analog_layer.input_shape) >= 1:
+                    input_shape = input_analog_layer.input_shape[0][1:] if input_analog_layer.input_shape[0][0] is None else input_analog_layer.input_shape[0]
+            except TypeError:
+                # It's not a list, so just access the tuple shape directly.
+                input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
 
-        # Delete wX, qX to free up memory.
-        del wX, qX
+            # Preallocate space for minibatch of data.
+            mini_batch = zeros((self.mini_batch_size, *input_shape))
+            num_examples_processed = 0
+
+            while num_examples_processed < self.batch_size:
+
+                # Grab a minibatch of data. Make sure not to request more data
+                # than would exceed the total number of samples used to train the layer.
+                # This is important if self.batch_size % self.mini_batch_size != 0.
+                actual_mini_batch_size = min(self.mini_batch_size, self.batch_size - num_examples_processed)
+                for sample_idx in range(actual_mini_batch_size):
+                    try:
+                        mini_batch[sample_idx, :] = next(self.get_data)
+                    except StopIteration:
+                        # No more samples!
+                        self._log(f"\tThe quantization training data generator has reached a StopIteration.")
+                        break
+
+                # Trim mini_batch if we did not request a full mini_batch.
+                mini_batch = mini_batch[0:actual_mini_batch_size]
+
+                wX = zeros((num_inbound_layers*actual_mini_batch_size, *layer_data_shape))
+                qX = zeros((num_inbound_layers*actual_mini_batch_size, *layer_data_shape))
+
+                if layer_idx == 0:
+                    # No hidden layers to pass data through.
+                    wX = mini_batch
+                    qX = mini_batch
+                else:
+                    # For every inbound layer, get the output from passing through that inbound layer
+                    for inbound_layer_idx in range(num_inbound_layers):
+                        analog_layer = inbound_analog_layers[inbound_layer_idx]
+                        quant_layer = inbound_quant_layers[inbound_layer_idx]
+
+                        # Define functions which will give you the output of the previous hidden layer
+                        # for both networks.
+                        prev_trained_output = Kfunction(
+                            [input_analog_layer.input],
+                            [analog_layer.output],
+                        )
+                        prev_quant_output = Kfunction(
+                        [self.quantized_net.layers[0].input],
+                        [quant_layer.output],
+                        )
+
+                        # Collect the output data
+                        wX[inbound_layer_idx*actual_mini_batch_size:(inbound_layer_idx+1)*actual_mini_batch_size] = prev_trained_output([mini_batch])[0]
+                        qX[inbound_layer_idx*actual_mini_batch_size:(inbound_layer_idx+1)*actual_mini_batch_size] = prev_quant_output([mini_batch])[0]
+
+                # Append to the hdf5 datasets. Remember to transpose because it's faster to read rows!
+                try:
+                    hf["wX"][..., num_examples_processed:num_examples_processed+wX.shape[0]] = wX.T
+                    hf["qX"][..., num_examples_processed:num_examples_processed+qX.shape[0]] = qX.T
+                except Exception as exc:
+                    breakpoint()
+                    raise exc
+
+                # Dereference wX, qX and call garbage collection--just to be safe--to free up memory.
+                del wX, qX
+                gc.collect()
+
+                # Increment the number of images processed!
+                num_examples_processed += actual_mini_batch_size
 
         return hf_filename
 
@@ -741,6 +781,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         network: Model,
         batch_size: int,
         get_data: Generator[array, None, None],
+        mini_batch_size=32,
         logger=None,
         bits=log2(3),
         alphabet_scalar=1,
@@ -757,6 +798,10 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             given layer.
         get_data : Generator
             A generator for yielding training examples for learning the quantized weights.
+        mini_batch_size: int
+            How many training examples to feed through the hidden layers at a time. We can't feed
+            in the entire batch all at once if the batch is large since CPUs and GPUs are memory 
+            constrained.
         logger : logger
             A logging object to write updates to. If None, updates are written to stdout.
         bits : float
@@ -775,6 +820,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # This quantifies how many images are used in a given batch to train a layer. This is subtly different
         # than the batch_size for the perceptron case because the actual data here are *patches* of images.
         self.batch_size = batch_size
+        self.mini_batch_size = mini_batch_size
 
         self.alphabet_scalar = alphabet_scalar
         self.bits = bits
@@ -935,6 +981,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
                 # Delete temporary arrays to prevent memory leak across loop iterations.
                 del seg_data, channel_wX, channel_qX
+                gc.collect()
 
     def _quantize_conv2D_layer(self, layer_idx: int):
         # wX formatted as an array of images. No flattening.
