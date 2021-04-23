@@ -141,7 +141,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     # Find out how many layers you're going to quantize. This tells us how many
     # times we need to chain together the training image generator.
     layer_names = np.array([layer.__class__.__name__ for layer in model.layers])
-    num_layers_to_quantize = sum((layer_names == 'Dense') + (layer_names == 'Conv2D'))
+    num_layers_to_quantize = sum((layer_names == 'Dense') + (layer_names == 'Conv2D') + (layer_names == 'DepthwiseConv2D'))
     quantization_train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=num_layers_to_quantize)
 
     my_quant_net = QuantizedCNN(

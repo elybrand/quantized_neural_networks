@@ -1172,8 +1172,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                 tic = time()
                 self._quantize_dense_layer(layer_idx)
                 super()._log(f"done. {time() - tic:.2f} seconds.")
-            if layer.__class__.__name__ == "Conv2D":
-                super()._log(f"Quantizing (Conv2D) layer {layer_idx} of {num_layers}...")
+            if layer.__class__.__name__ == "Conv2D" or layer.__class__.__name__ == "DepthwiseConv2D":
+                super()._log(f"Quantizing ({layer.__class__.__name__}) layer {layer_idx} of {num_layers}...")
                 tic = time()
                 # self._quantize_conv2D_layer(layer_idx)
                 self._quantize_conv2D_layer_parallel(layer_idx)
