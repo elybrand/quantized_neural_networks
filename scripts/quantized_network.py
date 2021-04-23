@@ -16,7 +16,7 @@ from numpy import (
     zeros_like,
     load,
 )
-from math import ceil
+from math import ceil, floor
 from scipy.linalg import norm
 from tensorflow.keras.utils import Sequence
 from tensorflow.keras.backend import function as Kfunction
@@ -135,9 +135,9 @@ def _segment_data2D(
             Strides of the kernel for a Conv2D layer.
         padding : string
             Either 'valid' or 'same', as in docstring for Conv2D layer.
-        channel_wX : 2D array
+        channel_wX : Array of 2D arrays
             Layer (channel) input for the analog convolutional neural network.
-        channel_qX : 2D array
+        channel_qX : Array of 2D arrays
             Layer (channel) input for the quantized convolutional neural network.
 
         Returns
@@ -230,7 +230,10 @@ def _build_patch_array_parallel(channel_idx: int, kernel_size: tuple, strides: t
 
                     # Store the directions in our random walk as ROWS because it makes accessing
                     # them substantially faster.
-                    if num_examples_processed == 0:                
+                    if num_examples_processed == 0:
+                        # estimated_shape = (seg_data.wX_seg.shape[1], seg_data.wX_seg.shape[0] * floor(total_examples/mini_batch_size) + total_examples%mini_batch_size)
+                        # patch_hf.create_dataset(f"wX_channel{channel_idx}", shape=estimated_shape)
+                        # patch_hf.create_dataset(f"qX_channel{channel_idx}", shape=estimated_shape)
                         patch_hf.create_dataset(f"wX_channel{channel_idx}", data = seg_data.wX_seg.T, chunks=True, maxshape=(None,None))
                         patch_hf.create_dataset(f"qX_channel{channel_idx}", data = seg_data.qX_seg.T, chunks=True, maxshape=(None,None))
                     else:
@@ -241,6 +244,8 @@ def _build_patch_array_parallel(channel_idx: int, kernel_size: tuple, strides: t
                         patch_hf[f"qX_channel{channel_idx}"].resize((patch_hf[f"qX_channel{channel_idx}"].shape[1]+seg_data.qX_seg.shape[0]), axis = 1)
                         patch_hf[f"qX_channel{channel_idx}"][..., -seg_data.qX_seg.shape[0]:] = seg_data.qX_seg.T
 
+                    # patch_hf[f"wX_channel{channel_idx}"][..., num_examples_processed:num_examples_processed+seg_data.wX_seg.shape[0]] = seg_data.wX_seg.T
+                    # patch_hf[f"qX_channel{channel_idx}"][..., num_examples_processed:num_examples_processed+seg_data.wX_seg.shape[0]] = seg_data.qX_seg.T
                     num_examples_processed += actual_mini_batch_size
 
                     # Dereference and call garbage collection just to be safe.
@@ -750,7 +755,7 @@ class QuantizedNeuralNetwork:
         self._log("\tFeeding input data through hidden layers...")
         tic = time()
         hf_filename = self._get_layer_data(layer_idx)
-        self._log(f"\tdone. {time()-tic.:2f} seconds.")
+        self._log(f"\tdone. {time()-tic:2f} seconds.")
 
         # Set the radius of the alphabet.
         rad = self.alphabet_scalar * median(abs(W.flatten()))
@@ -812,6 +817,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         logger=None,
         bits=log2(3),
         alphabet_scalar=1,
+        patch_mini_batch_size=5000
     ):
         """This is a wrapper class for a tensorflow.keras.models.Model class
         which handles quantizing the weights for Dense and Conv2D layers.
@@ -837,6 +843,11 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         alphabet_scalar : float
             A scaling parameter used to adjust the radius of the quantization alphabets for
             each layer.
+        patch_mini_batch_size: int
+            A separate mini_batch_size used for extracting image patches from hidden convolutional layers.
+            Things run really slow if this isn't terribly large, e.g. 32. You have to balance this with
+            how much memory you have in RAM. Remember: when you feed in 5000 training examples, you amplify
+            how large the patch tensors are by multiplying how many patches come from the image.
         """
 
         self.get_data = get_data
@@ -848,6 +859,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # than the batch_size for the perceptron case because the actual data here are *patches* of images.
         self.batch_size = batch_size
         self.mini_batch_size = mini_batch_size
+        self.patch_mini_batch_size = patch_mini_batch_size
 
         self.alphabet_scalar = alphabet_scalar
         self.bits = bits
@@ -983,8 +995,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             # Remember, we transposed wX, qX when we wrote it to hdf5 file which is why it's channel first.
             num_channels = hf["wX"].shape[0]
 
-            # TODO: I could probably multiprocess this as well. Would need to feed in a filename for the patch_hf.
-            # If multiprocessing using a single hdf5 file is problematic, just make distinct hdf5 files.
             for channel_idx in range(num_channels):
                 # Remember that we transposed the wX, qX data when we store them in hdf5 files. This is why 
                 # it's channel first here, despite tensorflow adopting the paradigm of being channel last. 
@@ -1025,11 +1035,10 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         super()._log("\tFeeding input data through hidden layers...")
         tic = time()
         hf_filename = super()._get_layer_data(layer_idx)
-        super()._log(f"\tdone. {time()-tic.:2f} seconds.")
+        super()._log(f"\tdone. {time()-tic:.2f} seconds.")
         super()._log("\tBuilding patch tensors...")
 
         # Create hdf5 file to store patch tensors.
-        # TODO: if parallelizing, need to feed in filename, not file object.
         with h5py.File(f"layer{layer_idx}_patch_tensors.h5", 'w') as patch_hf:
             tic = time()
             # This saves the patch tensors to disk, and closes the file object.
@@ -1086,7 +1095,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         super()._log("\tFeeding input data through hidden layers...")
         tic = time()
         hf_filename = super()._get_layer_data(layer_idx)
-        super()._log(f"\tdone. {time()-tic.:2f} seconds.")
+        super()._log(f"\tdone. {time()-tic:.2f} seconds.")
 
         # Build a dictionary with (key, value) = (channel_idx, file name where we store the vectorized
         # channel data)
@@ -1098,33 +1107,9 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # in a convolutional layer to the same dynamical system we use to quantize hidden units
         # in a perceptron.
 
-        # TODO: there's an issue when multiprocessing this code. I traced the issue down
-        # to when I call tensorflow's extract_patches function inside _segment_data2D.
-        # I have no idea why it's deadlocking there, so I guess I would need to find/write 
-        # another function to extract the image patches.
-
-        # super()._log("\tBuilding patch arrays (in parallel)...")
-        # tic = time()
-        # with concurrent.futures.ProcessPoolExecutor() as executor:
-        #     # Build a dictionary with (key, value) = (future, channel_idx). This will
-        #     # help us map channel image patches to the correct neuron index as we call
-        #     # _quantize_neuron asynchronously.
-        #     future_to_channel = {executor.submit(_build_patch_array_parallel, channel_idx, filter_shape, 
-        #         strides,
-        #         padding,
-        #         hf_filename, # Reference to hdf5 file that contains wX, qX 
-        #         channel_hf_filenames[channel_idx], # Filename for hdf5 file to save this channel's patch array to
-        #         ): channel_idx for channel_idx in range(num_channels)}
-        #     for future in concurrent.futures.as_completed(future_to_channel):
-        #         channel_idx = future_to_channel[future]
-        #         try:
-        #             future.result()
-        #         except Exception as exc:
-        #             self._log(f'\t\tChannel {channel_idx}\'s patch array generated an exception: {exc}')
-        #             raise Exception
-
-        #         self._log(f'\t\tChannel {channel_idx}\'s patch array generated successfully.')
-        # super()._log(f"\tdone. {time() - tic:.2f} seconds.")
+        # NOTE: I tried multiprocessing _build_patch_array_parallel. Strangely enough, it actually runs slower
+        # than when you segment the data with a for loop. I have no idea what tensorflow
+        # is doing under the hood with extract_patches that causes the slowdown.
 
         super()._log(f"\tBuilding patch tensors...")
         tic = time()
@@ -1134,7 +1119,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                 padding,
                 hf_filename, # Reference to hdf5 file that contains wX, qX 
                 channel_hf_filenames[channel_idx], # Filename for hdf5 file to save this channel's patch array to
-                self.mini_batch_size,)
+                self.patch_mini_batch_size,)
         super()._log(f"\tdone. {time() - tic:.2f} seconds.")
 
         # Now that the channel patch arrays are built, we can delete the hdf5 file that stores the 
