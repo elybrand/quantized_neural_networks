@@ -606,14 +606,22 @@ class QuantizedNeuralNetwork:
         layer = self.trained_net.layers[layer_idx]
         layer_data_shape = layer.input_shape[1:] if layer.input_shape[0] is None else layer.input_shape
         num_inbound_layers = len(inbound_analog_layers) if layer_idx != 0 else 1
+        input_analog_layer = self.trained_net.layers[0]
+        # Prebuild the partial models, since they require retracing so you don't want to do them inside a loop.
+        if layer_idx > 0:
+            prev_trained_models =  [Model(inputs=input_analog_layer.input,
+                                     outputs=analog_layer.output) for analog_layer in inbound_analog_layers]
+            prev_quant_models =  [Model(inputs=self.quantized_net.layers[0].input,
+                     outputs=quant_layer.output) for quant_layer in inbound_quant_layers]
+
+
         hf_dataset_shape = (num_inbound_layers*self.batch_size, *layer_data_shape)[::-1]
         hf_filename = f"layer{layer_idx}_data.h5"
         with h5py.File(hf_filename, 'w') as hf:
             hf.create_dataset("wX", shape=hf_dataset_shape)
             hf.create_dataset("qX", shape=hf_dataset_shape)
 
-            # Grab dimensions for mini-batch of training data.
-            input_analog_layer = self.trained_net.layers[0]
+            
             try:
                 # Don't ask me why, but for some models like the pretrained models the input layer's input shape
                 # is a list of a single tuple.
@@ -622,6 +630,10 @@ class QuantizedNeuralNetwork:
             except TypeError:
                 # It's not a list, so just access the tuple shape directly.
                 input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
+
+
+            # TODO: make get_data() a generator of generators. Then just feed the yielded generators to a newly compiled
+            # model which gives the output of a hidden layer.
 
             # Preallocate space for minibatch of data.
             mini_batch = zeros((self.mini_batch_size, *input_shape))
@@ -654,23 +666,11 @@ class QuantizedNeuralNetwork:
                 else:
                     # For every inbound layer, get the output from passing through that inbound layer
                     for inbound_layer_idx in range(num_inbound_layers):
-                        analog_layer = inbound_analog_layers[inbound_layer_idx]
-                        quant_layer = inbound_quant_layers[inbound_layer_idx]
+                        # TODO: cast mini_batch to tensor of appropriate datatype. May prevent retracing.
+                        wX = prev_trained_models[inbound_layer_idx].predict([mini_batch])
+                        qX = prev_quant_models[inbound_layer_idx].predict([mini_batch])
 
-                        # Define functions which will give you the output of the previous hidden layer
-                        # for both networks.
-                        prev_trained_output = Kfunction(
-                            [input_analog_layer.input],
-                            [analog_layer.output],
-                        )
-                        prev_quant_output = Kfunction(
-                        [self.quantized_net.layers[0].input],
-                        [quant_layer.output],
-                        )
 
-                        # Collect the output data
-                        wX[inbound_layer_idx*actual_mini_batch_size:(inbound_layer_idx+1)*actual_mini_batch_size] = prev_trained_output([mini_batch])[0]
-                        qX[inbound_layer_idx*actual_mini_batch_size:(inbound_layer_idx+1)*actual_mini_batch_size] = prev_quant_output([mini_batch])[0]
 
                 # Append to the hdf5 datasets. Remember to transpose because it's faster to read rows!
                 try:
