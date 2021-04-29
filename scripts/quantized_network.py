@@ -103,15 +103,16 @@ def _quantize_neuron_parallel(
     w: array
         The neuron to be quantized.
     hf_filename: str
-        Filename for hdf5 file with datasets wX, qX.
+        Filename for hdf5 file with datasets wX, qX, transposed.
     alphabet : array
         Scalar quantization alphabet
 
     Returns
     -------
-    QuantizedNeuron: NamedTuple
-        A tuple with the layer and neuron index, as well as the quantized neuron.
+    q: array
+        Quantized neuron.
     """
+
     with h5py.File(hf_filename, 'r') as hf:
         N_ell = hf['wX'].shape[0]
         u = zeros(hf['wX'].shape[1])
@@ -293,6 +294,36 @@ def _quantize_filter2D_parallel_jit(
 
         return q_filter
 
+class CIFAR10Sequence(Sequence):
+
+    def __init__(self, x_set, y_set, batch_size):
+        """Constructs a child class of the Keras Sequence class to generate batches
+        of images for ImageNet. 
+
+        Parameters
+        -----------
+        x_set : 1D-array
+            Array of images
+        y_set : 1D-array
+            Labels for the images.
+        batch_size: int
+            Specifies how many images to generate in a batch.
+        """
+
+        self.x, self.y = x_set, y_set
+        self.batch_size = batch_size
+
+    def __len__(self):
+        return ceil(len(self.x) / self.batch_size)
+
+    def __getitem__(self, idx):
+        batch_x = self.x[idx * self.batch_size:(idx + 1) *
+        self.batch_size]
+        batch_y = self.y[idx * self.batch_size:(idx + 1) *
+        self.batch_size]
+
+        return array(batch_x), array(batch_y)
+
 class ImageNetSequence(Sequence):
 
     def __init__(self, x_set, y_set, batch_size, preprocess_func):
@@ -380,9 +411,6 @@ class QuantizedNeuralNetwork:
         # Set all the weights to be the same a priori.
         self.quantized_net.set_weights(network.get_weights())
 
-        self.batch_size = batch_size
-        self.mini_batch_size = mini_batch_size
-
         self.alphabet_scalar = alphabet_scalar
 
         # Create a dictionary encoding which layers are Dense, and what their dimensions are.
@@ -409,104 +437,16 @@ class QuantizedNeuralNetwork:
         else:
             print(msg)
 
-    def _bit_round(self, t: float, rad: float) -> float:
-        """Rounds a quantity to the nearest atom in the (scaled) quantization alphabet.
-
-        Parameters
-        -----------
-        t : float
-            The value to quantize.
-        rad : float
-            Scaling factor for the quantization alphabet.
-
-        Returns
-        -------
-        bit : float
-            The quantized value.
-        """
-
-        # Scale the alphabet appropriately.
-        layer_alphabet = rad * self.alphabet
-        return layer_alphabet[argmin(abs(layer_alphabet - t))]
-
-    def _quantize_weight(
-        self, w: float, u: array, X: array, X_tilde: array, rad: float
-    ) -> float:
-        """Quantizes a single weight of a neuron.
-
-        Parameters
-        -----------
-        w : float
-            The weight.
-        u : array ,
-            Residual vector.
-        X : array
-            Vector from the analog network's random walk.
-        X_tilde : array
-            Vector from the quantized network's random walk.
-        rad : float
-            Scaling factor for the quantization alphabet.
-
-        Returns
-        -------
-        bit : float
-            The quantized value.
-        """
-
-        if norm(X_tilde, 2) < 10 ** (-16):
-            return 0
-
-        if abs(dot(X_tilde, u)) < 10 ** (-10):
-            return self._bit_round(w, rad)
-
-        return self._bit_round(dot(X_tilde, u + w * X) / (norm(X_tilde, 2) ** 2), rad)
-
-    def _quantize_neuron(
-        self,
-        layer_idx: int,
-        neuron_idx: int,
-        wX: array,
-        qX: array,
-        rad=1,
-    ) -> QuantizedNeuron:
-        """Quantizes a single neuron in a Dense layer.
-
-        Parameters
-        -----------
-        layer_idx : int
-            Index of the Dense layer.
-        neuron_idx : int,
-            Index of the neuron in the Dense layer.
-        wX : array
-            Layer input for the analog convolutional neural network.
-        qX : array
-            Layer input for the quantized convolutional neural network.
-        rad : float
-            Scaling factor for the quantization alphabet.
-
-        Returns
-        -------
-        QuantizedNeuron: NamedTuple
-            A tuple with the layer and neuron index, as well as the quantized neuron.
-        """
-
-        N_ell = wX.shape[1]
-        u = zeros(self.batch_size)
-        w = self.trained_net.layers[layer_idx].get_weights()[0][:, neuron_idx]
-        q = zeros(N_ell)
-        for t in range(N_ell):
-            q[t] = self._quantize_weight(w[t], u, wX[:, t], qX[:, t], rad)
-            u += w[t] * wX[:, t] - q[t] * qX[:, t]
-
-        return QuantizedNeuron(layer_idx=layer_idx, neuron_idx=neuron_idx, q=q)
-
-    def _get_layer_data(self, layer_idx: int):
+    def _get_layer_data_generator(self, layer_idx: int, transpose=False):
         """Gets the input data for the layer at a given index.
 
         Parameters
         -----------
         layer_idx : int
             Index of the layer.
+        transpose: bool
+            Whether to transpose the hidden activations or not. This is convenient for quantizing
+            Dense layers when reading the hidden feature datas as rows will speed up i/o from hdf5 file.
 
         Returns
         -------
@@ -541,94 +481,55 @@ class QuantizedNeuralNetwork:
                 inbound_analog_layers = [inbound_analog_layers]
                 inbound_quant_layers = [inbound_quant_layers]
 
-        # Now tell h5py how big your datasets are going to be. Remember that you'll actually
-        # be transposing the hidden layer data since it's faster to access the feature data
-        # when they're stored as rows.
+
         layer = self.trained_net.layers[layer_idx]
         layer_data_shape = layer.input_shape[1:] if layer.input_shape[0] is None else layer.input_shape
         num_inbound_layers = len(inbound_analog_layers) if layer_idx != 0 else 1
         input_analog_layer = self.trained_net.layers[0]
         # Prebuild the partial models, since they require retracing so you don't want to do them inside a loop.
         if layer_idx > 0:
-            prev_trained_models =  [Model(inputs=input_analog_layer.input,
-                                     outputs=analog_layer.output) for analog_layer in inbound_analog_layers]
-            prev_quant_models =  [Model(inputs=self.quantized_net.layers[0].input,
-                     outputs=quant_layer.output) for quant_layer in inbound_quant_layers]
+            prev_trained_model = Model(inputs=input_analog_layer.input,
+                                     outputs=[analog_layer.output for analog_layer in inbound_analog_layers])
+            prev_quant_model = Model(inputs=self.quantized_net.layers[0].input,
+                     outputs=[quant_layer.output for quant_layer in inbound_quant_layers])
 
-
-        hf_dataset_shape = (num_inbound_layers*self.batch_size, *layer_data_shape)[::-1]
+        # Preallocate space for h5py file.
+        # NOTE:  # Technically num_images is an upper bound, since not every batch has full batch size.
+        # I'm implicitly assuming that h5py zerofills pre-allocated space.
+        num_images = self.get_data.__len__()*self.get_data.batch_size
+        hf_dataset_shape = (num_inbound_layers*num_images, *layer_data_shape)
+        if transpose:
+            hf_dataset_shape = hf_dataset_shape[::-1]
         hf_filename = f"layer{layer_idx}_data.h5"
+
         with h5py.File(hf_filename, 'w') as hf:
-            hf.create_dataset("wX", shape=hf_dataset_shape)
-            hf.create_dataset("qX", shape=hf_dataset_shape)
-
-            
-            try:
-                # Don't ask me why, but for some models like the pretrained models the input layer's input shape
-                # is a list of a single tuple.
-                if len(input_analog_layer.input_shape) >= 1:
-                    input_shape = input_analog_layer.input_shape[0][1:] if input_analog_layer.input_shape[0][0] is None else input_analog_layer.input_shape[0]
-            except TypeError:
-                # It's not a list, so just access the tuple shape directly.
-                input_shape = input_analog_layer.input_shape[1:] if input_analog_layer.input_shape[0] is None else input_analog_layer.input_shape
-
-            num_examples_processed = 0
-
-            while num_examples_processed < self.batch_size:
-
-                # Grab a minibatch of data. Make sure not to request more data
-                # than would exceed the total number of samples used to train the layer.
-                # This is important if self.batch_size % self.mini_batch_size != 0.
-                actual_mini_batch_size = min(self.mini_batch_size, self.batch_size - num_examples_processed)
-                mini_batch = zeros((actual_mini_batch_size, *input_shape))
-
-                for sample_idx in range(actual_mini_batch_size):
-                    try:
-                        mini_batch[sample_idx, :] = next(self.get_data)
-                    except StopIteration:
-                        # No more samples!
-                        self._log(f"\tThe quantization training data generator has reached a StopIteration.")
-                        break
-
-                wX = zeros((num_inbound_layers*actual_mini_batch_size, *layer_data_shape))
-                qX = zeros((num_inbound_layers*actual_mini_batch_size, *layer_data_shape))
+            for batch_idx in range(self.get_data.__len__()):
+                # Grab the batch of data, ignoring labels.
+                mini_batch = self.get_data.__getitem__(batch_idx)[0]
 
                 if layer_idx == 0:
                     # No hidden layers to pass data through.
                     wX = mini_batch
                     qX = mini_batch
                 else:
+                    wX = prev_trained_model.predict_on_batch(mini_batch)
+                    qX = prev_quant_model.predict_on_batch(mini_batch)
 
-                    #TODO: figure out why it retraces the first go 'round.
+                if batch_idx == 0:
+                    hf.create_dataset("wX", shape=hf_dataset_shape)
+                    hf.create_dataset("qX", shape=hf_dataset_shape)
 
-                    # Convert to tensor to prevent retracing.
-                    mini_batch = convert_to_tensor(mini_batch, dtype=input_analog_layer.dtype)
+                if transpose:
+                    hf["wX"][..., batch_idx*wX.shape[0]:(batch_idx+1)*wX.shape[0]] = wX.T
+                    hf["qX"][..., batch_idx*qX.shape[0]:(batch_idx+1)*qX.shape[0]] = qX.T
+                else:
+                    hf["wX"][batch_idx*wX.shape[0]:(batch_idx+1)*wX.shape[0]] = wX
+                    hf["qX"][batch_idx*qX.shape[0]:(batch_idx+1)*qX.shape[0]] = qX
 
-                    # For every inbound layer, get the output from passing through that inbound layer
-                    for inbound_layer_idx in range(num_inbound_layers):
-                        # TODO: Retracing only seems to occur on the first call to predict_on_batch.
-                        # I'm not exactly sure why...
-                        wX = prev_trained_models[inbound_layer_idx].predict_on_batch(mini_batch)
-                        qX = prev_quant_models[inbound_layer_idx].predict_on_batch(mini_batch)
-
-
-
-                # Append to the hdf5 datasets. Remember to transpose because it's faster to read rows!
-                # TODO: for god's sake eric, don't transpose here. Undo it. Just make sure to modify
-                # the quantize_neuron code for the dense layers.
-                try:
-                    hf["wX"][..., num_examples_processed:num_examples_processed+wX.shape[0]] = wX.T
-                    hf["qX"][..., num_examples_processed:num_examples_processed+qX.shape[0]] = qX.T
-                except Exception as exc:
-                    breakpoint()
-                    raise exc
 
                 # Dereference and call garbage collection--just to be safe--to free up memory.
                 del mini_batch, wX, qX
                 gc.collect()
-
-                # Increment the number of images processed!
-                num_examples_processed += actual_mini_batch_size
 
         return hf_filename
 
@@ -651,35 +552,6 @@ class QuantizedNeuralNetwork:
         else:
             self.quantized_net.layers[layer_idx].set_weights([Q])
 
-    def _quantize_layer(self, layer_idx: int):
-        """Quantizes a Dense layer of a multi-layer perceptron.
-
-        Parameters
-        -----------
-        layer_idx : int
-            Index of the Dense layer.
-        """
-
-        W = self.trained_net.layers[layer_idx].get_weights()[0]
-        N_ell, N_ell_plus_1 = W.shape
-        # Placeholder for the weight matrix in the quantized network.
-        Q = zeros(W.shape)
-        N_ell_plus_1 = W.shape[1]
-        wX, qX = self._get_layer_data(layer_idx)
-
-        # Set the radius of the alphabet.
-        rad = self.alphabet_scalar * median(abs(W.flatten()))
-
-        for neuron_idx in range(N_ell_plus_1):
-            self._log(f"\tQuantizing neuron {neuron_idx} of {N_ell_plus_1}...")
-            tic = time()
-            qNeuron = self._quantize_neuron(layer_idx, neuron_idx, wX, qX, rad)
-            Q[:, neuron_idx] = qNeuron.q
-
-            self._log(f"\tdone. {time() - tic :.2f} seconds.")
-
-            self._update_weights(layer_idx, Q)
-
     def _quantize_layer_parallel(self, layer_idx: int):
         """Quantizes a Dense layer of a multi-layer perceptron.
 
@@ -697,7 +569,7 @@ class QuantizedNeuralNetwork:
 
         self._log("\tFeeding input data through hidden layers...")
         tic = time()
-        hf_filename = self._get_layer_data(layer_idx)
+        hf_filename = self._get_layer_data_generator(layer_idx, transpose=True)
         self._log(f"\tdone. {time()-tic:2f} seconds.")
 
         # Set the radius of the alphabet.
@@ -722,6 +594,7 @@ class QuantizedNeuralNetwork:
                     Q[:, neuron_idx] = future.result()
                 except Exception as exc:
                     self._log(f'\t\tNeuron {neuron_idx} generated an exception: {exc}')
+                    raise exc
 
                 self._log(f'\t\tNeuron {neuron_idx} of {N_ell_plus_1} quantized successfully.')
 
@@ -797,10 +670,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         self.quantized_net = clone_model(network)
         self.quantized_net.set_weights(network.get_weights())
 
-        # This quantifies how many images are used in a given batch to train a layer. This is subtly different
-        # than the batch_size for the perceptron case because the actual data here are *patches* of images.
-        self.batch_size = batch_size
-        self.mini_batch_size = mini_batch_size
         self.patch_mini_batch_size = patch_mini_batch_size
 
         self.alphabet_scalar = alphabet_scalar
@@ -934,9 +803,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # a potentially substantial memory leak.
         num_examples_processed = 0
         with h5py.File(f"./{hf_filename}", 'r') as feature_data_hf:
-            # Remember we transposed the hidden layer data, so number of training examples
-            # is the last dimension.
-            total_examples = feature_data_hf["wX"].shape[-1]
+            total_examples = feature_data_hf["wX"].shape[0]
             with h5py.File(f"./{patch_hf_filename}", 'w') as patch_hf:
 
 
@@ -944,18 +811,14 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
                     actual_mini_batch_size = min(mini_batch_size, total_examples - num_examples_processed)
 
-                    # Remember that we transposed the wX, qX data when we store them in hdf5 files. This is why 
-                    # it's channel first here, despite tensorflow adopting the paradigm of being channel last. 
-                    # Hence why we also transpose after slicing.
-                    channel_wX = feature_data_hf["wX"][channel_idx, ..., num_examples_processed:num_examples_processed+actual_mini_batch_size].T
-                    channel_qX = feature_data_hf["qX"][channel_idx, ..., num_examples_processed:num_examples_processed+actual_mini_batch_size].T
+                    channel_wX = feature_data_hf["wX"][num_examples_processed:num_examples_processed+actual_mini_batch_size, ..., channel_idx]
+                    channel_qX = feature_data_hf["qX"][num_examples_processed:num_examples_processed+actual_mini_batch_size, ..., channel_idx]
 
                     # We have to reshape into a 4 tensor because Tensorflow is picky.
-                    # TODO: YOU FOOL! SEGMENT DATA 2D PROBABLY PARALLEL PROCESSES ACROSS BATCHES! DONT RESHAPE! BATCH IT BITCH!
+                    # TODO: Maybe batch it instead of feeding in a giant batch?
                     channel_wX = reshape(channel_wX, (*channel_wX.shape, 1))
                     channel_qX = reshape(channel_qX, (*channel_qX.shape, 1))
 
-                    # TODO: Something breaks here if you multiprocess _build_patch_array_parallel() across channels.
                     seg_data = _segment_data2D(
                         kernel_size, strides, padding, rate, channel_wX, channel_qX
                     )
@@ -998,13 +861,9 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # hidden layers.
         super()._log("\tFeeding input data through hidden layers...")
         tic = time()
-        hf_filename = super()._get_layer_data(layer_idx)
+        hf_filename = super()._get_layer_data_generator(layer_idx)
         super()._log(f"\tdone. {time()-tic:.2f} seconds.")
 
-        # TODO: instead of having a separate DepthwiseConv2D function, why not just
-        # add the necessary changes here? Here, just check if there's a rate or not since
-        # you'll need that to generate patches. Then handle the case work in the channel_idx
-        # loop below and inside _quantize_channel_parallel_jit.
         layer = self.trained_net.layers[layer_idx]
         try:
             # Grab the dilation rate if it exists for this layer. It's relevant for
@@ -1048,87 +907,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         # Delete the hdf5 file that stores the hidden activations wX, qX datasets.
         os.remove(f"./{hf_filename}")
 
-    def _quantize_depthwise_conv2d_layer_parallel(self, layer_idx: int):
-        # wX formatted as an array of images. No flattening.
-        layer = self.trained_net.layers[layer_idx]
-        depth_multiplier = layer.depth_multiplier
-        filter_shape = layer.kernel_size
-        strides = layer.strides
-        padding = layer.padding.upper()
-        W = layer.get_weights()[0]
-        num_channels = W.shape[-2]  
-
-        input_shape = self.trained_net.layers[0].input_shape[1:]
-
-        # Grab the filename for the hdf5 file which stores the output of the previous
-        # hidden layers.
-        super()._log("\tFeeding input data through hidden layers...")
-        tic = time()
-        hf_filename = super()._get_layer_data(layer_idx)
-        super()._log(f"\tdone. {time()-tic:.2f} seconds.")
-
-        # Build a dictionary with (key, value) = (channel_idx, file name where we store the vectorized
-        # channel data)
-        channel_hf_filenames = {channel_idx: f"layer{layer_idx}_channel{channel_idx}_patch_array.h5" 
-                                    for channel_idx in range(num_channels)}
-
-        # Now build the hdf5 files which store the ``vectorized'' image patches for each channel.
-        # It's convenient to restructure the data this way because it reduces quantizing channel filters
-        # in a convolutional layer to the same dynamical system we use to quantize hidden units
-        # in a perceptron.
-
-        super()._log(f"\tBuilding patch tensors...")
-        tic = time()
-        for channel_idx in range(num_channels):
-            self._build_patch_array(channel_idx, filter_shape, 
-                strides,
-                padding,
-                hf_filename, # Reference to hdf5 file that contains wX, qX 
-                channel_hf_filenames[channel_idx], # Filename for hdf5 file to save this channel's patch array to
-                self.patch_mini_batch_size,)
-        super()._log(f"\tdone. {time() - tic:.2f} seconds.")
-
-        # Now that the channel patch arrays are built, we can delete the hdf5 file that stores the 
-        # wX, qX datasets.
-        os.remove(f"./{hf_filename}")
-
-        rad = self.alphabet_scalar * median(abs(W.flatten()))
-        alphabet = rad*self.alphabet
-        Q = zeros(W.shape)
-
-        # Quantize the filters in parallel.
-        super()._log("\tQuantizing filters (in parallel)...")
-        tic = time()
-        for depth_idx in range(depth_multiplier):
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                # Build a dictionary with (key, value) = (future, channel_idx). This will
-                # help us map channel image patches to the correct neuron index as we call
-                # _quantize_neuron asynchronously.
-                future_to_filter = {executor.submit(_quantize_filter2D_parallel, W[:, :, filter_idx, depth_idx], 
-                    channel_hf_filenames,
-                    alphabet,
-                    ): filter_idx for filter_idx in range(num_channels)}
-                for future in concurrent.futures.as_completed(future_to_filter):
-                    filter_idx = future_to_filter[future]
-                    try:
-                        # Populate the weights in the slice of Q.
-                        quantized_filter = future.result()
-                        Q[:, :, filter_idx, depth_idx] = quantized_filter
-                    except Exception as exc:
-                        self._log(f'\t\tDepth {depth_idx} Filter {filter_idx} generated an exception: {exc}')
-                        raise Exception
-
-                    self._log(f'\t\tDepth {depth_idx} Filter {filter_idx} of {num_channels} quantized successfully.')
-
-        # Update the weights of the quantized network at this layer.
-        super()._update_weights(layer_idx, Q)
-
-        super()._log(f"\tdone. {time() - tic:.2f} seconds.")
-
-        # Now delete the hdf5 files that stored the patch arrays for quantizing this layer.
-        for _, filename in channel_hf_filenames.items():
-            os.remove(f"./{filename}")
-
     def quantize_network(self):
 
         num_layers = len(self.trained_net.layers)
@@ -1148,6 +926,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             if layer.__class__.__name__ == "DepthwiseConv2D":
                 super()._log(f"Quantizing ({layer.__class__.__name__}) layer {layer_idx} of {num_layers}...")
                 tic = time()
-                self._quantize_depthwise_conv2d_layer_parallel(layer_idx)
+                self._quantize_conv2D_layer_parallel_jit(layer_idx)
                 super()._log(f"done. {time() - tic:.2f} seconds.")
 
