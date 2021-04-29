@@ -7,7 +7,7 @@ from tensorflow.random import set_seed
 from tensorflow.keras.models import load_model, clone_model, save_model
 from tensorflow.keras.datasets import mnist, cifar10
 from tensorflow.keras.utils import to_categorical
-from quantized_network import QuantizedCNN
+from quantized_network import QuantizedCNN, CIFAR10Sequence, _bit_round_parallel
 from itertools import chain
 from time import time
 from sys import stdout, argv
@@ -27,9 +27,9 @@ logger.addHandler(sh)
 # Grab the pretrained model name
 pretrained_model = [argv[1]]
 data_sets = ["cifar10"]
-q_train_sizes = [1]
+q_train_sizes = [500]
 ignore_layers = [[]]
-bits = [np.log2(i) for i in  (3, 4, 8, 16)]
+bits = [np.log2(i) for i in  (16,)]
 alphabet_scalars = [2, 3, 4, 5, 6]
 
 parameter_grid = product(
@@ -64,13 +64,6 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     X_train = X_train / 255.0
     X_test = X_test / 255.0
 
-    # MNIST only
-    if parameters.data_set == "mnist":
-        train_shape = X_train.shape
-        test_shape = X_test.shape
-        X_train = X_train.reshape(train_shape[0], train_shape[1], train_shape[2], 1)
-        X_test = X_test.reshape(test_shape[0], test_shape[1], test_shape[2], 1)
-
     num_classes = np.unique(y_train).shape[0]
     y_train = to_categorical(y_train, num_classes)
     y_test = to_categorical(y_test, num_classes)
@@ -83,14 +76,11 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
 
     # Find out how many layers you're going to quantize.
     layer_names = np.array([layer.__class__.__name__ for layer in model.layers])
-    num_layers_to_quantize = sum((layer_names == 'Dense') + (layer_names == 'Conv2D'))
+    num_layers_to_quantize = sum((layer_names == 'Dense') + (layer_names == 'Conv2D') + (layer_names == 'DepthwiseConv2D'))
 
-    get_data = (sample for sample in X_train[0:quant_train_size])
-    for i in range(num_layers_to_quantize):
-        # Chain together iterators over the entire training set. This is so each layer uses
-        # the entire training data.
-        get_data = chain(get_data, (sample for sample in X_train[0:quant_train_size]))
     batch_size = quant_train_size
+    get_data = CIFAR10Sequence(X_train[0:quant_train_size], y_train[0:quant_train_size], batch_size=32)
+    
 
     my_quant_net = QuantizedCNN(
         network=model,
@@ -122,11 +112,10 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     for layer_idx, layer in enumerate(model.layers):
         if layer.__class__.__name__ in ("Dense", "Conv2D"):
             # Use the same radius as the alphabet in the corresponding layer of the Sigma Delta network.
-            rad = max(
-                my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten()
-            )
-            W, b = model.layers[layer_idx].get_weights()
-            Q = np.array([my_quant_net._bit_round(w, rad) for w in W.flatten()]).reshape(
+            W, b = layer.get_weights()
+            rad = parameters.alphabet_scalar * np.median(np.abs(W.flatten()))
+            layer_alphabet = rad*my_quant_net.alphabet
+            Q = np.array([_bit_round_parallel(w, layer_alphabet) for w in W.flatten()]).reshape(
                 W.shape
             )
             MSQ_model.layers[layer_idx].set_weights([Q, b])
