@@ -123,7 +123,7 @@ def _quantize_neuron_parallel(
     return q
 
 def _segment_data2D(
-        kernel_size: tuple, strides: tuple, padding: str, channel_wX: array, channel_qX: array
+        kernel_size: tuple, strides: tuple, padding: str, rate: tuple, channel_wX: array, channel_qX: array
     ) -> SegmentedData:
         """Reshapes image tensor data into a 2D tensor. The rows of this 2D tensor are
         the flattened patches which are the arguments of the convolutions in a Conv2D layer.
@@ -136,6 +136,8 @@ def _segment_data2D(
             Strides of the kernel for a Conv2D layer.
         padding : string
             Either 'valid' or 'same', as in docstring for Conv2D layer.
+        rate: tuple
+            Tuple of integers encoding the dilation rate, if applicable.
         channel_wX : Array of 2D arrays
             Layer (channel) input for the analog convolutional neural network.
         channel_qX : Array of 2D arrays
@@ -148,9 +150,12 @@ def _segment_data2D(
             used in the convolutions of the analog and quantized Conv2D layers, respectively.
         """
 
-        kernel_sizes_list = [1, kernel_size[0], kernel_size[1], 1]
-        strides_list = [1, strides[0], strides[1], 1]
-        rates = [1, 1, 1, 1]
+        kernel_sizes_list = [1, *kernel_size, 1]
+        strides_list = [1, *strides, 1]
+        if rate:
+            rates = [1, *rate, 1]
+        else:
+            rates = [1, 1, 1, 1]
 
         wX_seg = extract_patches(
             images=channel_wX,
@@ -810,6 +815,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         hidden_activations_hf_filename: str,
         strides: tuple,
         padding: str,
+        rate: tuple,
         alphabet: array,
         patch_mini_batch_size=5000,
     ) -> array:
@@ -830,6 +836,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Strides for channel filter
         padding: str
             Padding for channel filter.
+        rate: tuple
+            Tuple of integers encoding the dilation rate, if applicable.
         alphabet : array
             Quantization alphabet.
         patch_mini_batch_size: int
@@ -851,6 +859,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         self._build_patch_array(channel_idx, filter_shape, 
                 strides,
                 padding,
+                rate,
                 hidden_activations_hf_filename, # Reference to hdf5 file that contains wX, qX 
                 channel_hf_filename, # Filename for hdf5 file to save this channel's patch array to
                 patch_mini_batch_size,)
@@ -861,6 +870,11 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         Q_channel = zeros(channel_filters.shape)
 
         # Now multiprocess quantizing channel filters across filter indices.
+
+        # TODO: consider using multiprocessing.Pool objects instead of concurrent.futures.
+        # Futures are heavy weight objects and are only good when the jobs you're multiprocessing
+        # are "heavy". There is a catch though. Multiprocessing.Pool has bug when a child process
+        # crashes. See https://stackoverflow.com/a/18672200/15773124 for an overview.
         super()._log(f"\t\tQuantizing channel filters (in parallel)...")
         tic = time()
         with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -880,13 +894,13 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                     self._log(f'\t\t\tChannel {channel_idx} Filter {filter_idx} generated an exception: {exc}')
                     raise Exception
 
-        super()._log(f"\t\tdone. {time()-tic:.2f} seconds").
+        super()._log(f"\t\tdone. {time()-tic:.2f} seconds.")
         # Now delete the hdf5 files that stored the patch arrays for quantizing this layer.
         os.remove(f"./{channel_hf_filename}")
 
         return Q_channel
 
-    def _build_patch_array(self, channel_idx: int, kernel_size: tuple, strides: tuple, padding: str, hf_filename: str, patch_hf_filename: str, mini_batch_size: int) -> tuple:
+    def _build_patch_array(self, channel_idx: int, kernel_size: tuple, strides: tuple, padding: str, rate: tuple, hf_filename: str, patch_hf_filename: str, mini_batch_size: int) -> tuple:
         """Returns a 3D tensor whose first two axes encode the 2D tensor of vectorized
         patches of images, and the last axis encodes the channel.
 
@@ -900,6 +914,8 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             Tuple of integers encoding the stride information of the filter/kernel
         padding: string
             Padding argument for Conv2D layer.
+        rate: tuple
+            Tuple of integers encoding the dilation rate, if applicable.
         hf_filename: str
             File name for the hdf5 file that contains the wX, qX datasets (transposed). These are the hidden layer
             data used to learn the quantizations at the current layer.
@@ -941,7 +957,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
                     # TODO: Something breaks here if you multiprocess _build_patch_array_parallel() across channels.
                     seg_data = _segment_data2D(
-                        kernel_size, strides, padding, channel_wX, channel_qX
+                        kernel_size, strides, padding, rate, channel_wX, channel_qX
                     )
 
                     # Store the directions in our random walk as ROWS because it makes accessing
@@ -985,7 +1001,17 @@ class QuantizedCNN(QuantizedNeuralNetwork):
         hf_filename = super()._get_layer_data(layer_idx)
         super()._log(f"\tdone. {time()-tic:.2f} seconds.")
 
+        # TODO: instead of having a separate DepthwiseConv2D function, why not just
+        # add the necessary changes here? Here, just check if there's a rate or not since
+        # you'll need that to generate patches. Then handle the case work in the channel_idx
+        # loop below and inside _quantize_channel_parallel_jit.
         layer = self.trained_net.layers[layer_idx]
+        try:
+            # Grab the dilation rate if it exists for this layer. It's relevant for
+            # forming the patch arrays.
+            rate = layer.dilation_rate
+        except:
+            rate = None
         W = layer.get_weights()[0]
         rad = self.alphabet_scalar * median(abs(W.flatten()))
         alphabet = rad*self.alphabet
@@ -999,6 +1025,10 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             # We do this so we only need to have one channel patch array
             # built at any given time. This helps limit the memory pressure
             # on disk.
+
+            # NOTE: Multiprocessing is only advantageous if there are multiple
+            # filters per channel. This need not be the case, e.g. in DepthwiseConv2D
+            # layers where the depth_multiplier=1.
             tic = time()
             Q[:, :, channel_idx, :] = self._quantize_channel_parallel_jit(
                                             channel_idx,
@@ -1006,6 +1036,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                                             hf_filename,
                                             strides=layer.strides,
                                             padding=layer.padding.upper(),
+                                            rate=rate,
                                             alphabet=alphabet,
                                             patch_mini_batch_size=5000,
                                         )
