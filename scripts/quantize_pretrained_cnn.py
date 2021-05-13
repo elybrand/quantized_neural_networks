@@ -27,10 +27,10 @@ logger.addHandler(sh)
 # Grab the pretrained model name
 pretrained_model = [argv[1]]
 data_sets = ["cifar10"]
-q_train_sizes = [500]
+q_train_sizes = [1, 2, 3, 4, 5]
 ignore_layers = [[]]
-bits = [np.log2(i) for i in  (16,)]
-alphabet_scalars = [2, 3, 4, 5, 6]
+bits = [4]
+alphabet_scalars = [4]
 
 parameter_grid = product(
     pretrained_model,
@@ -128,7 +128,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     trial_metrics = pd.DataFrame(
         {
             "data_set": parameters.data_set,
-            "serialized_model": parameters.pretrained_model,
+            "serialized_model": model_name,
             "q_train_size": parameters.q_train_size,
             "ignore_layers": [parameters.ignore_layers],
             "bits": parameters.bits,
