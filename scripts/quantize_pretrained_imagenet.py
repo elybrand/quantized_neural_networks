@@ -21,12 +21,14 @@ from pathlib import Path
 from glob import glob
 import scipy.io
 import cv2
+import gc
 
 # Write logs to file and to stdout. Overwrite previous log file.
 fh = logging.FileHandler("../train_logs/model_quantizing.log", mode="w+")
 fh.setLevel(logging.INFO)
 sh = logging.StreamHandler(stream=stdout)
 sh.setLevel(logging.INFO)
+
 # Only use the logger in this module.
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)
@@ -38,14 +40,14 @@ logger.addHandler(sh)
 dir_imagenet_val_dataset = Path("../data/")
 dir_processed_images = Path("../data/preprocessed_val/")
 
-# Grab the pretrained model name
-
 pretrained_model = [VGG16]
 preprocess_func = [vgg16_preprocess_input]
 data_sets = ["ILSVRC2012"]
-q_train_sizes = [5000]
-bits = [4, 5, 6, 7, 8]
-alphabet_scalars = list(range(1, 20))
+q_train_sizes = [1500]
+valid_sizes = [20000]
+is_quantize_conv2d = [False]
+bits = [3]
+alphabet_scalars = [float(argv[1])]
 
 np_seed = 0
 tf_seed = 0
@@ -57,20 +59,15 @@ parameter_grid = product(
     q_train_sizes,
     bits,
     alphabet_scalars,
+    valid_sizes,
+    is_quantize_conv2d
 )
 
 ParamConfig = namedtuple(
     "ParamConfig",
-    "pretrained_model, preprocess_func, data_set, q_train_size, bits, alphabet_scalar",
+    "pretrained_model, preprocess_func, data_set, q_train_size, bits, alphabet_scalar, valid_size, is_quantize_conv2d",
 )
 param_iterable = (ParamConfig(*config) for config in parameter_grid)
-
-def _preprocess_and_reshape(image_path, preprocess_func):
-    image = np.load(image_path)
-    preprocessed_image = preprocess_func(image)
-    # TODO: reshaping into 4 tensor is bad.
-    reshaped_image = np.reshape(preprocessed_image, (1, *preprocessed_image.shape))
-    return reshaped_image
 
 def top_k_accuracy(y_true, y_pred, k=1, tf_enabled=True):
     '''
@@ -97,6 +94,8 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
             data_set: {parameters.data_set},
             serialized_model: {model.name},
             q_train_size: {parameters.q_train_size},
+            valid_size: {parameters.valid_size},
+            is_quantize_conv2d: {parameters.is_quantize_conv2d},
             bits: {parameters.bits},
             alphabet_scalar: {parameters.alphabet_scalar},
             np_seed: {np_seed},
@@ -115,30 +114,36 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     y = np.load(str(dir_imagenet_val_dataset/"y_val.npy"))
 
     train_idxs = np.random.choice(range(num_images), size=parameters.q_train_size, replace=False,)
-    test_idxs = list(set(range(len(image_paths))).difference(set(train_idxs)))
+    valid_test_idxs = list(set(range(len(image_paths))).difference(set(train_idxs)))
+    valid_idxs = np.random.choice(valid_test_idxs, size=parameters.valid_size, replace=False)
+    test_idxs = list(set(range(num_images)).difference(set(train_idxs)).difference(set(valid_idxs)))
 
     train_paths = image_paths[train_idxs]
+    valid_paths = image_paths[valid_idxs]
     test_paths = image_paths[test_idxs]
     y_train = y[train_idxs]
+    y_valid = y[valid_idxs]
     y_test = y[test_idxs]
 
     # Use one-hot encoding for labels. 
     num_classes = np.unique(y).shape[0]
     y_train = to_categorical(y_train, num_classes)
+    y_valid = to_categorical(y_valid, num_classes)
     y_test = to_categorical(y_test, num_classes)
 
     logger.info("Generating analog predicted labels...")
     tic = time()
-    test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
-    y_test_pred_analog = model.predict(test_generator, verbose=True)
+    valid_generator = ImageNetSequence(valid_paths, y_valid, batch_size=16, preprocess_func=parameters.preprocess_func)
+    y_valid_pred_analog = model.predict(valid_generator, verbose=True)
     logger.info(f"done. {time()-tic:.2f} seconds.")
-    top1_analog = top_k_accuracy(y_test, y_test_pred_analog, k=1, tf_enabled=True)
-    top5_analog = top_k_accuracy(y_test, y_test_pred_analog, k=5, tf_enabled=True)
+    top1_analog = top_k_accuracy(y_valid, y_valid_pred_analog, k=1, tf_enabled=True)
+    top5_analog = top_k_accuracy(y_valid, y_valid_pred_analog, k=5, tf_enabled=True)
 
-    # train_generator = ImageNetSequence(train_paths, y_train, batch_size=32, preprocess_func=parameters.preprocess_func)
-    # y_train_pred_analog = model.predict(train_generator, verbose=True)
-    # top1_analog = top_k_accuracy(y_train, y_train_pred_analog, k=1, tf_enabled=True)
-    # top5_analog = top_k_accuracy(y_train, y_train_pred_analog, k=5, tf_enabled=True)
+    # test_generator = ImageNetSequence(test_paths, y_test, batch_size=16, preprocess_func=parameters.preprocess_func)
+    # y_test_pred_analog = model.predict(test_generator, verbose=True)
+    # logger.info(f"done. {time()-tic:.2f} seconds.")
+    # top1_analog = top_k_accuracy(y_test, y_test_pred_analog, k=1, tf_enabled=True)
+    # top5_analog = top_k_accuracy(y_test, y_test_pred_analog, k=5, tf_enabled=True)
 
     logger.info(f"Analog network (top 1 accuracy, top 5 accuracy) = ({top1_analog:.2f}, {top5_analog:.2f})")
 
@@ -146,7 +151,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     # times we need to chain together the training image generator.
     layer_names = np.array([layer.__class__.__name__ for layer in model.layers])
     num_layers_to_quantize = sum((layer_names == 'Dense') + (layer_names == 'Conv2D') + (layer_names == 'DepthwiseConv2D'))
-    quantization_train_generator = ImageNetSequence(train_paths, y_train, batch_size=32, preprocess_func=parameters.preprocess_func)
+    quantization_train_generator = ImageNetSequence(train_paths, y_train, batch_size=16, preprocess_func=parameters.preprocess_func)
 
     my_quant_net = QuantizedCNN(
         network=model,
@@ -155,6 +160,8 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         logger=logger,
         bits=parameters.bits,
         alphabet_scalar=parameters.alphabet_scalar,
+        patch_mini_batch_size=1000,
+        is_quantize_conv2d=parameters.is_quantize_conv2d,
     )
     try:
         tic = time()
@@ -180,15 +187,16 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     model_name = model_name.replace(".","")
     save_model(my_quant_net.quantized_net, f"../quantized_models/{model_name}")
 
-    test_generator = test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
-    y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True)
-    top1_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=1, tf_enabled=True)
-    top5_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=5, tf_enabled=True)
+    valid_generator = ImageNetSequence(valid_paths, y_valid, batch_size=16, preprocess_func=parameters.preprocess_func)
+    y_valid_pred_gpfq = my_quant_net.quantized_net.predict(valid_generator, verbose=True)
+    logger.info(f"done. {time()-tic:.2f} seconds.")
+    top1_gpfq = top_k_accuracy(y_valid, y_valid_pred_gpfq, k=1, tf_enabled=True)
+    top5_gpfq = top_k_accuracy(y_valid, y_valid_pred_gpfq, k=5, tf_enabled=True)
 
-    # train_generator = get_image_generator(train_paths, parameters.preprocess_func, epochs=1)
-    # y_train_pred_gpfq = my_quant_net.quantized_net.predict(train_generator, verbose=True)
-    # top1_gpfq = top_k_accuracy(y_train, y_train_pred_gpfq, k=1, tf_enabled=True)
-    # top5_gpfq = top_k_accuracy(y_train, y_train_pred_gpfq, k=5, tf_enabled=True)
+    # test_generator = test_generator = ImageNetSequence(test_paths, y_test, batch_size=16, preprocess_func=parameters.preprocess_func)
+    # y_test_pred_gpfq = my_quant_net.quantized_net.predict(test_generator, verbose=True)
+    # top1_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=1, tf_enabled=True)
+    # top5_gpfq = top_k_accuracy(y_test, y_test_pred_gpfq, k=5, tf_enabled=True)
 
     logger.info(f"GPFQ network (top 1 accuracy, top 5 accuracy) = ({top1_gpfq:.2f}, {top5_gpfq:.2f})")
 
@@ -199,7 +207,7 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     # Set all the weights to be equal at first. This matters for batch normalization layers.
     MSQ_model.set_weights(model.get_weights())
     for layer_idx, layer in enumerate(model.layers):
-        if layer.__class__.__name__ in ("Dense", "Conv2D", "DepthwiseConv2D"):
+        if layer.__class__.__name__ == "Dense" or (parameters.is_quantize_conv2d and layer.__class__.__name__ == "Conv2D"):
             # Use the same radius as the alphabet in the corresponding layer of the GPFQ network.
             if MSQ_model.layers[layer_idx].use_bias:
                 W, b = model.layers[layer_idx].get_weights()
@@ -220,15 +228,16 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         optimizer="sgd", loss="categorical_crossentropy", metrics=["accuracy"]
     )
 
-    test_generator = ImageNetSequence(test_paths, y_test, batch_size=32, preprocess_func=parameters.preprocess_func)
-    y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True)
-    top1_msq = top_k_accuracy(y_test, y_test_pred_msq, k=1, tf_enabled=True)
-    top5_msq = top_k_accuracy(y_test, y_test_pred_msq, k=5, tf_enabled=True)
+    valid_generator = ImageNetSequence(valid_paths, y_valid, batch_size=16, preprocess_func=parameters.preprocess_func)
+    y_valid_pred_msq = MSQ_model.predict(valid_generator, verbose=True)
+    logger.info(f"done. {time()-tic:.2f} seconds.")
+    top1_msq = top_k_accuracy(y_valid, y_valid_pred_msq, k=1, tf_enabled=True)
+    top5_msq = top_k_accuracy(y_valid, y_valid_pred_msq, k=5, tf_enabled=True)
 
-    # train_generator = ImageNetSequence(train_paths, y_train, batch_size=32, preprocess_func=parameters.preprocess_func)
-    # y_train_pred_msq = MSQ_model.predict(train_generator, verbose=True)
-    # top1_msq = top_k_accuracy(y_train, y_train_pred_msq, k=1, tf_enabled=True)
-    # top5_msq = top_k_accuracy(y_train, y_train_pred_msq, k=5, tf_enabled=True)
+    # test_generator = ImageNetSequence(test_paths, y_test, batch_size=16, preprocess_func=parameters.preprocess_func)
+    # y_test_pred_msq = MSQ_model.predict(test_generator, verbose=True)
+    # top1_msq = top_k_accuracy(y_test, y_test_pred_msq, k=1, tf_enabled=True)
+    # top5_msq = top_k_accuracy(y_test, y_test_pred_msq, k=5, tf_enabled=True)
 
     logger.info(f"MSQ network (top 1 accuracy, top 5 accuracy) = ({top1_msq:.2f}, {top5_msq:.2f})")
 
@@ -236,7 +245,10 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         {
             "data_set": parameters.data_set,
             "serialized_model": model.name,
+            "quantized_model": model_name,
+            "is_quantize_conv2d": parameters.is_quantize_conv2d,
             "q_train_size": parameters.q_train_size,
+            "valid_size": parameters.valid_size,
             "bits": parameters.bits,
             "alphabet_scalar": parameters.alphabet_scalar,
             "analog_test_top1_acc": top1_analog,
@@ -252,6 +264,8 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
         index=[model_timestamp],
     )
 
+    del model, my_quant_net, MSQ_model
+
     return trial_metrics
 
 
@@ -265,7 +279,7 @@ if __name__ == "__main__":
 
     for idx, params in enumerate(param_iterable):
         trial_metrics = quantize_network(params)
-
+        gc.collect()
         if idx == 0:
             # add the header
             trial_metrics.to_csv(f"../model_metrics/{file_name}.csv", mode="a")
