@@ -15,8 +15,6 @@ from numpy import (
     prod,
     zeros_like,
     load,
-    sqrt,
-    sum
 )
 from math import ceil, floor
 from scipy.linalg import norm
@@ -82,13 +80,13 @@ def _quantize_weight_parallel(
         The quantized value.
     """
 
-    if norm(X_tilde) < 10 ** (-16):
+    if norm(X_tilde, 2) < 10 ** (-16):
         return 0
 
     if abs(dot(X_tilde, u)) < 10 ** (-10):
         return _bit_round_parallel(w, alphabet)
 
-    return _bit_round_parallel(dot(X_tilde, u + w * X) / (norm(X_tilde) ** 2), alphabet)
+    return _bit_round_parallel(dot(X_tilde, u + w * X) / (norm(X_tilde, 2) ** 2), alphabet)
 
 def _quantize_neuron_parallel(
     w: array,
@@ -116,8 +114,7 @@ def _quantize_neuron_parallel(
         N_ell = hf['wX'].shape[0]
         u = zeros(hf['wX'].shape[1])
         q = zeros(N_ell)
-    for t in range(N_ell):
-        with h5py.File(hf_filename, 'r') as hf:
+        for t in range(N_ell):
             q[t] = _quantize_weight_parallel(w[t], u, hf['wX'][t, :], hf['qX'][t, :], alphabet)
             u += w[t] * hf['wX'][t, :] - q[t] * hf['qX'][t, :]
 
@@ -512,7 +509,7 @@ class QuantizedNeuralNetwork:
         tic = time()
         hf_filename = self._get_layer_data_generator(layer_idx, transpose=True)
         self._log(f"\tdone. {time()-tic:2f} seconds.")
-        
+
         # Set the radius of the alphabet.
         rad = self.alphabet_scalar * median(abs(W.flatten()))
         layer_alphabet = rad*self.alphabet
@@ -540,13 +537,8 @@ class QuantizedNeuralNetwork:
                 self._log(f'\t\tNeuron {neuron_idx} of {N_ell_plus_1} quantized successfully.')
 
             # Set the weights for the quantized network.
-        
-        self._update_weights(layer_idx, Q)
+            self._update_weights(layer_idx, Q)
         self._log(f"\tdone. {time()-tic:.2f} seconds.")
-
-        del W, Q
-        gc.collect()
-        
 
         # Now delete the hdf5 file.
         os.remove(f"./{hf_filename}")
@@ -611,7 +603,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             how much memory you have in RAM. Remember: when you feed in 5000 training examples, you amplify
             how large the patch tensors are by multiplying how many patches come from the image.
         is_quantize_conv2d: boolean
-            A boolean indicating whether Conv2D layers should be quantized. Defaults to True.
+-           A boolean indicating whether Conv2D layers should be quantized. Defaults to True.
         """
 
         self.get_data = get_data
@@ -759,6 +751,7 @@ class QuantizedCNN(QuantizedNeuralNetwork):
                     # Store the directions in our random walk as ROWS because it makes accessing
                     # them substantially faster.
                     if num_examples_processed == 0:
+                        #TODO: This estimated shape is good! Preallocate away baby!
                         patches_per_image = seg_data.wX_seg.shape[0]//actual_mini_batch_size
                         estimated_shape = (seg_data.wX_seg.shape[1], patches_per_image*total_examples)
                         # patch_hf.create_dataset(f"wX_channel{channel_idx}", shape=estimated_shape)
@@ -821,6 +814,9 @@ class QuantizedCNN(QuantizedNeuralNetwork):
             for channel_idx in range(num_channels):
 
                 # super()._log(f"\tQuantizing filters along channel {channel_idx}...")
+                # NOTE: Multiprocessing is only advantageous if there are multiple
+                # filters per channel. This need not be the case, e.g. in DepthwiseConv2D
+                # layers where the depth_multiplier=1.
                 tic = time()
                 Q[:, :, channel_idx, :] = self._quantize_channel_parallel_jit(
                                                 channel_idx,
@@ -836,9 +832,6 @@ class QuantizedCNN(QuantizedNeuralNetwork):
 
         # Update the weights of the quantized network at this layer.
         super()._update_weights(layer_idx, Q)
-
-        del Q, W
-        gc.collect()
 
         # Delete the hdf5 file that stores the hidden activations wX, qX datasets.
         os.remove(f"./{hf_filename}")
