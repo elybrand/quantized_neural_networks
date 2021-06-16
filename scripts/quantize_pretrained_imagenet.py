@@ -46,8 +46,8 @@ data_sets = ["ILSVRC2012"]
 q_train_sizes = [1500]
 valid_sizes = [20000]
 is_quantize_conv2d = [False]
-bits = [3]
-alphabet_scalars = [float(argv[1])]
+bits = [np.log2(3)]
+alphabet_scalars = [int(argv[1])]
 
 np_seed = 0
 tf_seed = 0

@@ -1,5 +1,5 @@
 #!/bin/bash
 
-for alphabet_scalar in 2 3 4 5 6 7 8 9 10 ; do
+for alphabet_scalar in 2 3 4 5 ; do
     python quantize_pretrained_imagenet.py ${alphabet_scalar}
 done
