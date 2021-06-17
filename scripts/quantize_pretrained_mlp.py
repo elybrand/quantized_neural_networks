@@ -13,7 +13,7 @@ from tensorflow.keras.initializers import GlorotUniform
 from tensorflow.keras.models import Sequential, clone_model, save_model, load_model
 from tensorflow.keras.datasets import mnist
 from tensorflow.keras.utils import to_categorical
-from quantized_network import QuantizedNeuralNetwork
+from quantized_network import QuantizedNeuralNetwork, MNISTSequence, _bit_round_parallel
 from sys import stdout, argv
 from os import mkdir
 from itertools import chain
@@ -70,11 +70,7 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
     # Determine how many layers you need to quantize.
     num_layers = sum([layer.__class__.__name__ in ('Dense',) for layer in model.layers])
 
-    get_data = (sample for sample in X_train[0:quant_train_size])
-    for i in range(num_layers):
-        # Chain together iterators over the entire training set. This is so each layer uses
-        # the entire training data.
-        get_data = chain(get_data, (sample for sample in X_train[0:quant_train_size]))
+    get_data = MNISTSequence(X_train[0:quant_train_size], y_train[0:quant_train_size], batch_size=quant_train_size)
     batch_size = quant_train_size
     my_quant_net = QuantizedNeuralNetwork(
         network=model,
@@ -107,11 +103,10 @@ def train_network(parameters: ParamConfig) -> pd.DataFrame:
             layer.__class__.__name__ in ("Dense", "Conv2D")
         ):
             # Use the same radius as the alphabet in the corresponding layer of the Sigma Delta network.
-            rad = max(
-                my_quant_net.quantized_net.layers[layer_idx].get_weights()[0].flatten()
-            )
             W, b = model.layers[layer_idx].get_weights()
-            Q = np.array([my_quant_net._bit_round(w, rad) for w in W.flatten()]).reshape(
+            rad = parameters.alphabet_scalar * np.median(np.abs(W.flatten()))
+            layer_alphabet = rad*my_quant_net.alphabet
+            Q = np.array([_bit_round_parallel(w, layer_alphabet) for w in W.flatten()]).reshape(
                 W.shape
             )
             MSQ_model.layers[layer_idx].set_weights([Q, b])

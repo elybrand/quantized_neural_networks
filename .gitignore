@@ -14,3 +14,7 @@ train_logs/*
 serialized_models/
 quantized_models/
 model_metrics/
+data/*.npy
+data/val
+data/preprocessed_val
+scripts/*.h5
