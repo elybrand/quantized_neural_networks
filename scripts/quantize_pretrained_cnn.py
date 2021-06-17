@@ -27,10 +27,10 @@ logger.addHandler(sh)
 # Grab the pretrained model name
 pretrained_model = [argv[1]]
 data_sets = ["cifar10"]
-q_train_sizes = [1, 2, 3, 4, 5]
+q_train_sizes = [5000]
 ignore_layers = [[]]
-bits = [4]
-alphabet_scalars = [4]
+bits = [np.log2(3), 2, 3, 4]
+alphabet_scalars = [2, 3, 4, 5, 6]
 
 parameter_grid = product(
     pretrained_model,
@@ -74,12 +74,8 @@ def quantize_network(parameters: ParamConfig) -> pd.DataFrame:
     analog_loss, analog_accuracy = model.evaluate(X_test, y_test, verbose=True)
     logger.info(f"Analog network test accuracy = {analog_accuracy:.2f}")
 
-    # Find out how many layers you're going to quantize.
-    layer_names = np.array([layer.__class__.__name__ for layer in model.layers])
-    num_layers_to_quantize = sum((layer_names == 'Dense') + (layer_names == 'Conv2D') + (layer_names == 'DepthwiseConv2D'))
-
     batch_size = quant_train_size
-    get_data = CIFAR10Sequence(X_train[0:quant_train_size], y_train[0:quant_train_size], batch_size=32)
+    get_data = CIFAR10Sequence(X_train[0:quant_train_size], y_train[0:quant_train_size], batch_size=16)
     
 
     my_quant_net = QuantizedCNN(
