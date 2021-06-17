@@ -232,6 +232,36 @@ def _quantize_filter2D_parallel_jit(
 
         return q_filter
 
+class MNISTSequence(Sequence):
+
+    def __init__(self, x_set, y_set, batch_size):
+        """Constructs a child class of the Keras Sequence class to generate batches
+        of images for ImageNet. 
+
+        Parameters
+        -----------
+        x_set : 1D-array
+            Array of images
+        y_set : 1D-array
+            Labels for the images.
+        batch_size: int
+            Specifies how many images to generate in a batch.
+        """
+
+        self.x, self.y = x_set, y_set
+        self.batch_size = batch_size
+
+    def __len__(self):
+        return ceil(len(self.x) / self.batch_size)
+
+    def __getitem__(self, idx):
+        batch_x = self.x[idx * self.batch_size:(idx + 1) *
+        self.batch_size]
+        batch_y = self.y[idx * self.batch_size:(idx + 1) *
+        self.batch_size]
+
+        return array(batch_x), array(batch_y)
+
 class CIFAR10Sequence(Sequence):
 
     def __init__(self, x_set, y_set, batch_size):
